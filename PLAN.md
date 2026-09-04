@@ -18907,3 +18907,138 @@ is worth a sweep asking whether any other row's note already contradicts its own
 third time (§63, §79, now) that the fix for a mark was to move a drop from the engine's default into
 cmote's own code. The behaviour was already what the row claimed; what was missing was the claim being
 checkable. Two of those three were caught by re-reading, and none of them by anything failing.
+
+
+## §163 — Three unsupported rows, and not one of them a plain gap
+
+The second sweep of the shape §161 ran, on the *Graphics, window ops, keyboard, C0* table. Three ❌
+rows, one question each: build it, or refuse it.
+
+> | Kitty graphics protocol / unicode placeholders / animation | ❌ |
+> | ReGIS | ❌ |
+> | **xterm modifyOtherKeys** — query, the other six resources | ❌ |
+
+**Nothing was built.** One row was already a refusal and said so in its own code; one was four
+features wearing one mark; one is a gap that could not be filled completely even if it were filled.
+Three rows in, seven rows out, and the sweep's whole product is that each of the seven can be checked.
+
+### XTMODKEYS' other six — the code was already refusing
+
+The row was right about the protocol and never looked at cmote. XTMODKEYS carries seven resources —
+ctlseqs numbers them 0, 1, 2, 3, 4, 6 and 7, with **no resource 5** — and cmote tracks
+`modifyOtherKeys` alone. The reply is formatted as an XTMODKEYS control, so there is no spelling of
+"I do not have that resource", and an answer for `modifyCursorKeys` would assert a level for a knob
+the key encoder does not have. Worse than a lie: a program that then SET that resource would be
+ignored while the next query kept reporting the invented number back.
+
+So `modkeys::report` compares the resource against 4 and returns nothing otherwise. **That is an
+allow-list one resource wide**, reached through a full CSI parse — the construction `term/dsr.rs`
+refuses `CSI ? 26 n` with (§36, §82), `term/iterm.rs` meets OSC 1337 keys with, and
+`term/pointer.rs` pointer shapes with. All three of those rows are 🛑. This one read ❌.
+
+**How it got there is the interesting part**, because §68 is the section that found three refusals by
+splitting rows exactly like this one. It asked *is this answered?*, got no, and stopped. The reply
+format having no way to say "not mine" is a fact about the **protocol**; what cmote does about it is a
+fact about **cmote**, and only the second decides the mark. The mechanism was in front of §68 and the
+question that would have surfaced it was one word away.
+
+Implementing the six instead was weighed and refused. It is not a reporting job: `modifyCursorKeys`
+and `modifyFunctionKeys` change the escape sequences the key encoder EMITS for arrows and F-keys, so
+honouring them means five encodings where cmote has one, across the whole of `term/keymap.rs`. Nothing
+asks — editors use the kitty keyboard protocol or resource 4, both supported.
+
+No behaviour changed. What changed is that the refusal is pinned resource by resource: the query test
+named 0, 1, 2 and an omitted parameter and now walks all six through `OTHER_RESOURCES`, and a second
+test does the same for the SET half, which had one resource covered and five not. The constant is
+written out rather than derived from a range **because the numbering has a hole at 5** — a `0..=7`
+loop would assert something about a resource that does not exist.
+
+### Kitty graphics — four features under one mark
+
+This document had costed kitty's protocol since part 5 from its own summary of it. §163 read the
+specification, and there are four rows in the row:
+
+* **Transmission and placement** — ❌, and the one row of the family that could still land by the
+  route sixel took: scan the APC beside the stream, composite with the code already in the tree,
+  anchor to an absolute document line (§41). What an implementation must not do first is **answer**.
+  Detection is a query action, and the specification's words for a reply are *"the terminal emulator
+  supports the protocol"* — GIP's DA1 attribute `90` in another spelling (§155).
+* **Unicode placeholders** — ❌ for a different price, and the price §155 already measured. A placement
+  referenced from the TEXT stream, by `U+10EEEE` cells whose diacritics say which image and which row
+  and column of it each cell shows, is **per-cell image identity**: the engine's flag word is full
+  (§151), a map beside the grid is dropped on every reflow, and a per-cell map is unbounded in remote
+  input (§12). §41 met the requirement differently and that is why sixel works — an image reserves its
+  cells and no cell remembers anything.
+* **File, temp-file and shared-memory transmission** (`t=f` / `t=t` / `t=s`) — 🤷. The payload names a
+  path on the user's own machine and the terminal reads it, *following symlinks* per the specification;
+  for `t=t` it **deletes** the file afterwards and for `t=s` it **unlinks** the shared-memory object. A
+  remote directing cmote to read and then remove a local file it names is the shape refused at every
+  other door: iTerm's `OSC 1337 File=` (§70), `local::path::to_native` as the local layer's
+  one-directional boundary, shell programs resolved only from known locations and never from remote
+  text.
+* **Animation** (`a=f`, `z=<ms>`) — 🤷. Frames composited onto a canvas, the `z` key giving the gap in
+  **milliseconds** before the next one: a repaint clock whose rate a remote picks. §65 refused one for
+  the cursor and §162 spent the argument on SGR blink, where the same request arrives one attribute at
+  a time.
+
+**The two refusals take 🤷 rather than 🛑 and the legend is why**: `vte` drops the whole APC string
+before cmote is offered a byte of it, so nothing here performs them and nothing pays to. Marking them
+🛑 would be §79's mistake — a mark claiming somebody declined where nobody looked — and earning it
+would mean building an APC parser in order to refuse through it, which reads like the start of an
+implementation and is not one.
+
+**One difference from GIP is load-bearing.** §155 refused the Good Image Protocol partly because its
+feature detection is all-or-nothing: DA1 attribute `90` says *this specification*, not one fifth of
+it. Kitty replies **per request** — `ENOENT`, `EINVAL`, `ETOODEEP`, `ECYCLE`, `ENOPARENT`, "unless
+silenced" by `q=2` — so a subset can decline one request without lying about the protocol, once there
+is a core to decline from. That is exactly why the core here stays a gap where GIP's is a refusal, and
+it is the kind of distinction that only comes out of reading the specification rather than the summary.
+
+### ReGIS — a gap that could not be a whole one
+
+The door had never been named in the row: ReGIS arrives in a `DCS … p` envelope, `term/dcs.rs` frames
+it like every other DCS, and no reader claims it, `graphics::is_sixel` requiring final byte `q`. Seen,
+framed, dropped, nobody refusing — which is what ❌ is for.
+
+The price is an interpreter for curves, fills, screen addressing and text, for a language essentially
+nothing emits. That is YAGNI with a real cost behind it.
+
+What re-pricing found is that a conforming ReGIS could not be whole here anyway. DEC's own manual
+gives the `@` command: it *"defines a command string as a macrograph … used to store and recall other
+ReGIS command strings"*, with `@:<letter>` … `@;` to define, `@<letter>` to invoke, `@.` to clear all
+twenty-six, and **"up to 10,000 characters of code can be stored"**. The Report command's `M` option
+then *"tells ReGIS to report the contents of a specified macrograph"*.
+
+A remote-named store of stored programs, and a readback of it. That is the class part 6 refuses
+outright — DECDMAC, DECDLD, DECUDK, GIP's `o=u` pool — and §82 already declines the macro-space
+reports on the same ground. So ReGIS would ship with a hole cmote chooses, and the next section to
+cost the interpreter should know that before it starts.
+
+### What is refused
+
+Nothing new is refused in code, and one mark that was already earned is now claimed. Prove-it, two,
+both on the allow-list the XTMODKEYS row turns on:
+
+* the resource check dropped from `report` → *"resource 0 is not cmote's to report"*
+* the same check dropped from `apply` → *"resource 0 set to 1 moved modifyOtherKeys"*, and
+  `the_two_parameter_bounds_answer_differently` fails with it, which is the older test noticing the
+  same hole from the other side
+
+### What to keep
+
+**A row that names three features is three rows, and the mark it carries belongs to whichever of them
+somebody last thought about.** Kitty's read ❌ for the protocol's size, which is true of one of its
+four parts. §66 and §68 spent themselves on rows whose *notes* carried a second answer; this is the
+same defect one level up, in the row's own title, and the tell is the slashes in it.
+
+**"Is it answered?" and "does cmote refuse it?" are different questions.** §68 asked the first about
+XTMODKEYS and filed the answer under the second. Both this sweep and §162 found a row where the code
+was performing a refusal the column called a gap, which makes three in two sections — so the question
+worth asking of every remaining ❌ is not *what would it cost to build* but *what does cmote do when it
+arrives today*.
+
+**Read the specification, not this document's summary of it.** Part 5 had priced kitty's protocol in
+one sentence since it was written, and the sentence was right about the part it described. Reading the
+source turned one row into four, moved two of them out of the gap column, and produced the one fact
+that distinguishes this protocol from the one §155 refused. The same lesson §98 recorded about prices
+quoted three times, met again on a feature nobody had re-read because nobody disputed it.

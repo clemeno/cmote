@@ -2059,6 +2059,24 @@ the line above to be a *wrapped* line and cmote's does not — because closing i
 mode does, which is a decision for a section about mode 45 and not a by-product of a sweep. It is
 named in that row rather than kept here.
 
+**§163 swept a second table's ❌ column and found not one plain gap in it.** Three rows, the same
+question each — build it, or refuse it — and three answers of three different kinds. **XTMODKEYS' other
+six resources were already refused in cmote's own code**: `modkeys::report` is an allow-list one
+resource wide, which is the construction this document credits `dsr.rs`, `iterm.rs` and `pointer.rs`
+with at three other rows, all 🛑. §68 created this row by splitting and gave it ❌ because it asked *is
+this answered?* rather than *does cmote refuse it?* — the second time in two sections that a mark
+turned out to be a question nobody had finished asking (§162 was the first). **Kitty graphics was four
+features under one mark**, and reading the specification rather than this document's summary of it
+split the row: the core is a gap that could still land by sixel's route, the unicode placeholders want
+per-cell image identity nothing here can hold (§151, §155), and the file mediums and the animation are
+refusals cmote has already taken at other doors — 🤷 rather than 🛑, because `vte` drops the whole APC
+string before cmote is offered a byte. That reading also produced the one fact separating this protocol
+from the one §155 refused: kitty's error codes are **per request**, so a subset can decline honestly,
+where GIP's DA1 attribute `90` cannot. **ReGIS stays a gap and could not be a whole one**: its `@`
+macrographs store ten thousand characters of remote-sent command stream under twenty-six letters and
+its Report command reads one back, which is the class part 6 refuses outright. Three rows in, seven
+rows out, and every one of the seven can now be checked on its own.
+
 ---
 
 ## Evidence
