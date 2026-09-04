@@ -1728,7 +1728,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 1004 | Focus events | ✅ | the terminal sends `CSI I` and `CSI O` as the window takes and loses focus |
 | 1006 | SGR mouse | ✅ | the SGR mouse encoding, `CSI < b ; col ; row M` / `m` — a release keeps its button and the coordinates are unbounded |
 | 1005 | UTF-8 mouse | ✅ | the UTF-8 mouse encoding, which widens the classic one's coordinates; tracked on the seam, `1006` taking precedence when both are set — and `1016` over both since §150 (§67, §150) |
-| 1015 | urxvt mouse | ❌ | urxvt's own encoding — the classic three fields as decimal parameters on a `CSI … M`, so it lifts the 223 ceiling the way SGR does without SGR's press/release split. The one member of this family the table did not name until §150, which found it while reading the DECSET list whole and did not build it |
+| 1015 | urxvt mouse | ✅ | urxvt's own encoding — `ESC [ <b>;<x>;<y> M`, the classic three fields written as decimal parameters, so the 223 ceiling is lifted; the final byte is always `M`, so a release cannot name its button and says 3 as the one-byte form does. **Only `b` carries the classic +32 bias**, stated by the defining source and pinned by that source's own worked example, which is what the test asserts. ctlseqs says "Enable urxvt Mouse Mode" and no more, so the definition read is urxvt's own manual page. cmote's own mode, on the encoding ladder between 1006 above and 1005 below (§150, §161, `term/mouse.rs`) |
 | 1007 | Alt-scroll | ✅ | the wheel sends arrow keys while the alternate screen is up |
 | 1016 | SGR-pixel mouse | ✅ | the SGR reports with **pixels in place of cells** — same button field, same `M`/`m` split, one-based from the top-left of the text area. cmote's own mode, sitting at the top of the encoding ladder, so a program that also set 1006 gets the more specific of the two. **The coordinate convention is reasoned rather than quoted**: every reachable source says only "Enable SGR Mouse PixelMode, xterm", and §150 names the inference in writing rather than presenting it as read (§150, `term/mouse.rs`) |
 | 1049 | Alternate screen | ✅ | the alternate screen: the cursor is saved and a cleared page swapped in. No scrollback there, by design |
@@ -2319,6 +2319,15 @@ Quoted where a row's wording now rests on it.
   **"Modifier key (shift, ctrl, meta) information is *also* sent"** — the *also* being what says X10
   carries none. Being older, it has nothing on 1016, whose coordinate convention is therefore reasoned
   rather than quoted, and labelled as such in its row.
+- **Mode 1015 is defined by urxvt's manual page, not by xterm's** (§161). ctlseqs gives it one line —
+  "*Ps* = 1 0 1 5 → Enable urxvt Mouse Mode" — and the Mouse Tracking section that would say more is
+  past the same cut, in the same two builds, that the bullet above records; XFree86's older copy
+  predates the mode entirely. `urxvt(7)` defines it, the mode being that terminal's: **"If mode 1015 is
+  active, urxvt sends the sequence `ESC [ <b>;<x>;<y> M` where the parameters are provided as decimal
+  numbers instead of octets and only `b` includes an offset of 32"**, with the worked example
+  **"Shift-Button-1 press at top row, column 80. `ESC [ 36 ; 80 ; 1 M`"**. The example is what makes
+  the sentence checkable — shift (4) on button 1 (0) plus the bias is 36 — and it is the test's
+  expected bytes.
 - **OSC 8's own specification** (Egmont Koblinger's, the document VTE and iTerm2 implement): the
   sequence is `OSC 8 ; params ; URI ST` and is closed with `OSC 8 ; ; ST`; "params is an optional list
   of key=value assignments, separated by the `:` character", of which only `id` is defined — "character

@@ -4,15 +4,16 @@
 //   CSI ? 5 h / l     DECSCNM   reverse video over the whole screen
 //   CSI ? 45 h / l    XTREVWRAP reverse wraparound — a backspace at the left edge backs up a line
 //   CSI ? 9 h / l               X10 mouse tracking — press only, no modifiers (§150)
+//   CSI ? 1015 h / l            urxvt mouse — the classic fields as decimal parameters (§161)
 //   CSI ? 1016 h / l            SGR-Pixels mouse — the SGR reports, in pixels (§150)
 //
-// `alacritty_terminal`'s `NamedPrivateMode` names fifteen modes and neither of these is among them,
-// so both arrive at `Handler::set_private_mode` as `PrivateMode::Unknown(n)` and are dropped — DECRQM
+// `alacritty_terminal`'s `NamedPrivateMode` names fifteen modes and none of these is among them, so
+// each arrives at `Handler::set_private_mode` as `PrivateMode::Unknown(n)` and is dropped — DECRQM
 // included, which would answer "not recognised" for a mode cmote implements. That is mode 69's
 // situation (§102) and it gets mode 69's answer: the gate claims the sequence and does not forward
 // it, so there is one writer and the engine is never asked to hold a bit it has never heard of.
 //
-// WHY THESE TWO ARE A TABLE AND THE OTHER TWO ARE NOT. cmote holds four private modes of its own now
+// WHY THESE FIVE ARE A TABLE AND THE OTHER TWO ARE NOT. cmote holds seven private modes of its own now
 // and they live in three places, which looks like an accident and is not:
 //
 //   * **69** (DECLRMM) lives in `term/margins.rs`, because turning it on brings a whole geometry with
@@ -20,12 +21,13 @@
 //     of what that module holds (§102).
 //   * **2048** (in-band resize) lives on `ReplyBuffer`, because the four numbers its notification is
 //     built from are already there and a second home would be a second thing to keep in step (§148).
-//   * **5**, **45**, **9** and **1016** are *just bits*. None carries any other state, and the
-//     operations wanted of them are table operations: set one, read one back for DECRQM and XTSAVE,
-//     clear them all on RIS. So they are a table — and §150 was the test of that: adding the two mouse
-//     modes was four lines here and nothing at all in the gate.
+//   * **5**, **45**, **9**, **1015** and **1016** are *just bits*. None carries any other state, and
+//     the operations wanted of them are table operations: set one, read one back for DECRQM and
+//     XTSAVE, clear them all on RIS. So they are a table — and §150 was the test of that: adding the
+//     two mouse modes was four lines here and nothing at all in the gate. §161's third mouse mode was
+//     again nothing at all in the gate.
 //
-// THE TWO MOUSE MODES, AND WHY NEITHER CLEARS ANYTHING (§150).
+// THE THREE MOUSE MODES, AND WHY NONE OF THEM CLEARS ANYTHING (§150, §161).
 //
 // xterm holds ONE variable for the mouse protocol, so `CSI ? 1000 h` overwrites X10 and X10 overwrites
 // it. cmote cannot copy that and does not try: modes 1000, 1002 and 1003 are the ENGINE's, and clearing
@@ -40,6 +42,13 @@
 // That is a real divergence and it is worth stating plainly rather than burying: a program that sets
 // 1000 and then 9 gets X11 reports from cmote and X10 reports from xterm. The alternative was writing
 // engine state from here, and the ladder is where cmote already resolves this family.
+//
+// **1015 joins the encoding ladder in the middle** (§161), between 1006 above it and 1005 below, and
+// the rung is the same "most specific first" the other three were placed by: SGR names the button a
+// release belongs to and 1015 cannot, so 1006 outranks it; 1015 writes its coordinates as decimal
+// parameters with no ceiling of any kind, so it outranks the two byte-counting forms. xterm holds one
+// `extend_coords` variable and would let the LAST of these win; cmote resolves by rung for the reason
+// above, and 1015 makes that divergence reachable in one more spelling rather than a new one.
 //
 // WHAT REVERSE WRAPAROUND MEANS HERE, AND WHAT NO SOURCE SAYS.
 //
@@ -75,6 +84,9 @@ pub const REVERSE_WRAP: u16 = 45;
 /// X10 mouse tracking — the original protocol, press-only and with no modifier bits (§150).
 pub const X10_MOUSE: u16 = 9;
 
+/// urxvt mouse mode — the classic three fields written as decimal parameters (§161).
+pub const URXVT_MOUSE: u16 = 1015;
+
 /// SGR-Pixels mouse mode — the SGR reports with pixel coordinates in place of cells (§150).
 pub const PIXEL_MOUSE: u16 = 1016;
 
@@ -89,7 +101,13 @@ pub const PIXEL_MOUSE: u16 = 1016;
 /// §150's two mouse modes took the count to four bools in one struct — which clippy refuses, and
 /// rightly: four bools in a row is where a caller starts transposing them. Four bits under four names
 /// cannot be transposed at all.
-const HELD: [u16; 4] = [REVERSE_VIDEO, REVERSE_WRAP, X10_MOUSE, PIXEL_MOUSE];
+const HELD: [u16; 5] = [
+	REVERSE_VIDEO,
+	REVERSE_WRAP,
+	X10_MOUSE,
+	URXVT_MOUSE,
+	PIXEL_MOUSE,
+];
 
 /// The DEC private modes cmote holds itself, as a small table (§149, §150).
 ///
@@ -146,6 +164,11 @@ impl DecModes {
 		self.holds(X10_MOUSE)
 	}
 
+	/// Mode 1015 — whether mouse reports take urxvt's decimal-parameter form (§161).
+	pub fn urxvt_mouse(self) -> bool {
+		self.holds(URXVT_MOUSE)
+	}
+
 	/// Mode 1016 — whether mouse reports carry pixel coordinates in place of cells (§150).
 	pub fn pixel_mouse(self) -> bool {
 		self.holds(PIXEL_MOUSE)
@@ -198,6 +221,7 @@ mod tests {
 		assert!(!modes.reverse_video());
 		assert!(!modes.reverse_wrap());
 		assert!(!modes.x10_mouse());
+		assert!(!modes.urxvt_mouse());
 		assert!(!modes.pixel_mouse());
 	}
 
@@ -212,6 +236,7 @@ mod tests {
 			(REVERSE_VIDEO, DecModes::reverse_video),
 			(REVERSE_WRAP, DecModes::reverse_wrap),
 			(X10_MOUSE, DecModes::x10_mouse),
+			(URXVT_MOUSE, DecModes::urxvt_mouse),
 			(PIXEL_MOUSE, DecModes::pixel_mouse),
 		];
 		for (mode, read) in readers {

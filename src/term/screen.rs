@@ -44,11 +44,15 @@ pub enum MouseMode {
 }
 
 /// How a mouse report is encoded on the wire (§9): the classic single-byte form, its UTF-8
-/// widening, SGR, or SGR with pixel coordinates (§150).
+/// widening, urxvt's decimal parameters (§161), SGR, or SGR with pixel coordinates (§150).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseEncoding {
 	Default,
 	Utf8,
+	/// `CSI ? 1015 h` — the classic three fields written as decimal parameters on a `CSI … M`, so the
+	/// coordinates have no ceiling (§161). cmote's own; above the two byte-counting forms and below
+	/// SGR, which can say which button a release belongs to and this cannot.
+	Urxvt,
 	Sgr,
 	/// `CSI ? 1016 h` — the SGR reports with pixels in place of cells (§150). cmote's own, and the
 	/// most specific of the four, so it sits at the TOP of the ladder below.
@@ -430,15 +434,19 @@ impl<'a> Screen<'a> {
 		}
 	}
 
-	/// How mouse reports are encoded (§9, §150). The same ladder, and mode 1016 is at the top of it:
-	/// SGR-Pixels is SGR's own reports with pixels in place of cells, so a program that asked for both
-	/// asked for the more specific of the two.
+	/// How mouse reports are encoded (§9, §150, §161). The same ladder, and mode 1016 is at the top of
+	/// it: SGR-Pixels is SGR's own reports with pixels in place of cells, so a program that asked for
+	/// both asked for the more specific of the two. urxvt's 1015 sits between SGR and the two
+	/// byte-counting forms — it lifts their coordinate ceiling and still cannot name the button a
+	/// release belongs to (`term/decmodes.rs`).
 	pub fn mouse_encoding(&self) -> MouseEncoding {
 		let mode = self.engine.mode();
 		if self.modes.pixel_mouse() {
 			MouseEncoding::SgrPixels
 		} else if mode.contains(TermMode::SGR_MOUSE) {
 			MouseEncoding::Sgr
+		} else if self.modes.urxvt_mouse() {
+			MouseEncoding::Urxvt
 		} else if mode.contains(TermMode::UTF8_MOUSE) {
 			MouseEncoding::Utf8
 		} else {

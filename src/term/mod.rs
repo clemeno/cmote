@@ -4144,6 +4144,42 @@ mod tests {
 	}
 
 	#[test]
+	fn the_urxvt_mouse_encoding_sits_between_sgr_and_the_byte_counting_forms() {
+		// The middle rung, and the reason for it: 1015 lifts the coordinate ceiling the two byte forms
+		// have, and still cannot name the button a release belongs to, which SGR can (§161).
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b[?1000h\x1b[?1005h");
+		assert_eq!(
+			terminal.screen().mouse_encoding(),
+			screen::MouseEncoding::Utf8
+		);
+		terminal.process(b"\x1b[?1015h");
+		assert_eq!(
+			terminal.screen().mouse_encoding(),
+			screen::MouseEncoding::Urxvt,
+			"above the UTF-8 widening"
+		);
+		terminal.process(b"\x1b[?1006h");
+		assert_eq!(
+			terminal.screen().mouse_encoding(),
+			screen::MouseEncoding::Sgr,
+			"and below SGR"
+		);
+		terminal.process(b"\x1b[?1006l");
+		assert_eq!(
+			terminal.screen().mouse_encoding(),
+			screen::MouseEncoding::Urxvt,
+			"still there underneath it"
+		);
+		// RIS clears it, being a bit in the same table as the other two (§149).
+		terminal.process(b"\x1bc");
+		assert_eq!(
+			terminal.process(b"\x1b[?1015$p"),
+			b"\x1b[?1015;2$y".to_vec()
+		);
+	}
+
+	#[test]
 	fn the_two_mouse_modes_answer_their_own_decrqm() {
 		// Neither is in the engine's `NamedPrivateMode`, so its answer would be `0` — not recognised —
 		// for two modes cmote implements (§150).

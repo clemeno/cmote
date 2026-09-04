@@ -40,6 +40,22 @@
 // is what its name says: SGR mouse mode with pixels where the cells were. SGR reports 1-based cells
 // from the same corner, so the two differ in their unit and in nothing else.
 //
+// URXVT (§161) IS THE CLASSIC REPORT WITH ITS THREE FIELDS WRITTEN AS PARAMETERS. xterm's ctlseqs is
+// no help again — "Ps = 1 0 1 5 -> Enable urxvt Mouse Mode" is the whole entry — but this mode belongs
+// to another terminal, and that terminal's own manual page defines it:
+//
+//   "If mode 1015 is active, urxvt sends the sequence "ESC [ <b>;<x>;<y> M" where the parameters are
+//    provided as decimal numbers instead of octets and only "b" includes an offset of 32."
+//
+//   "Shift-Button-1 press at top row, column 80.  ESC [ 36 ; 80 ; 1 M"
+//
+// The example is what makes it checkable: shift (4) on button 1 (0) is 4, and 36 is that plus the 32
+// the classic form biases its byte by — so `b` is the CLASSIC button byte's value, in decimal, and the
+// coordinates are the plain one-based numbers with no bias at all. Two consequences follow and both
+// are the classic form's rather than SGR's: the final byte is always `M`, so a release cannot name its
+// button and says 3 like the one-byte form does, and there is no ceiling on the coordinates, which is
+// the whole reason the mode exists.
+//
 // The caller decides *whether* to consult us: a Shift-held click is the user's own text
 // selection and never becomes a report (the xterm convention), so the grid widget checks
 // that before calling in.
@@ -153,6 +169,15 @@ pub fn encode(
 		MouseEncoding::Sgr => {
 			let final_byte = if released { 'm' } else { 'M' };
 			format!("\x1b[<{field};{column};{line}{final_byte}").into_bytes()
+		}
+		// urxvt: the same three fields as parameters (§161). The button carries the classic form's
+		// bias of 32 — the manual page says "only `b` includes an offset of 32" and its worked
+		// example is 36 for a shifted button 1 — and the coordinates carry none, being decimal
+		// already. Always `M`: this mode has no release spelling, which is why the field above
+		// gave a release the classic 3.
+		MouseEncoding::Urxvt => {
+			let button = u16::from(field) + 32;
+			format!("\x1b[{button};{column};{line}M").into_bytes()
 		}
 		// Same three fields, each written as a code point rather than a byte, which is how
 		// this mode lifts the 223 ceiling.
@@ -503,6 +528,62 @@ mod tests {
 			none(),
 		);
 		assert_eq!(report.as_deref(), Some(&b"\x1b[<35;1601;681M"[..]));
+	}
+
+	// --- urxvt (§161) ------------------------------------------------------------------------------
+
+	/// urxvt(7)'s own worked example, reproduced byte for byte: "Shift-Button-1 press at top row,
+	/// column 80. `ESC [ 36 ; 80 ; 1 M`". It pins the two halves the prose states separately — that the
+	/// button carries the classic bias (shift 4, plus 32, is 36) and that the coordinates do not.
+	#[test]
+	fn the_urxvt_encoding_reproduces_its_manual_pages_example() {
+		let report = encode(
+			MouseMode::PressRelease,
+			MouseEncoding::Urxvt,
+			MouseEvent::Press(Button::Left),
+			at(0, 79),
+			Modifiers::SHIFT,
+		);
+		assert_eq!(report.as_deref(), Some(&b"\x1b[36;80;1M"[..]));
+	}
+
+	/// The final byte is always `M`, so a release has nowhere to say which button came up and falls
+	/// back on the classic form's 3 — 35 once the bias is added. This is the one thing SGR does that
+	/// this mode cannot, and it is why 1006 sits above it on the ladder.
+	#[test]
+	fn a_urxvt_release_cannot_name_its_button() {
+		let release = encode(
+			MouseMode::PressRelease,
+			MouseEncoding::Urxvt,
+			MouseEvent::Release(Button::Right),
+			at(0, 0),
+			none(),
+		);
+		assert_eq!(release.as_deref(), Some(&b"\x1b[35;1;1M"[..]));
+		// The same release under SGR keeps the button and marks itself with a lowercase final byte.
+		let sgr = encode(
+			MouseMode::PressRelease,
+			MouseEncoding::Sgr,
+			MouseEvent::Release(Button::Right),
+			at(0, 0),
+			none(),
+		);
+		assert_eq!(sgr.as_deref(), Some(&b"\x1b[<2;1;1m"[..]));
+	}
+
+	/// Decimal parameters have no 223 ceiling, which is the whole reason the mode exists — the same
+	/// cell the one-byte form has to clamp is reported whole here.
+	#[test]
+	fn a_urxvt_coordinate_past_the_classic_ceiling_is_reported_whole() {
+		let report = encode(
+			MouseMode::AnyMotion,
+			MouseEncoding::Urxvt,
+			MouseEvent::Motion(None),
+			at(0, 400),
+			none(),
+		);
+		// 3 (no button) + 32 (motion) + 32 (the bias) = 67.
+		assert_eq!(report.as_deref(), Some(&b"\x1b[67;401;1M"[..]));
 	}
 
 	#[test]
