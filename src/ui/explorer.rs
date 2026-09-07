@@ -12,7 +12,7 @@
 // surface here sets its own background *and* foreground, so contrast never depends on
 // the system light/dark preference (the trap §14 documents).
 
-use iced::alignment::Vertical;
+use iced::alignment::{Horizontal, Vertical};
 use iced::widget::text::Wrapping;
 use iced::widget::{checkbox, column, container, mouse_area, row, scrollable, text, text_input};
 use iced::{Border, Color, Element, Length, Padding, mouse};
@@ -56,6 +56,10 @@ pub(crate) const FOCUS_FG: Color = Color::from_rgb8(0x5a, 0x8a, 0xd0);
 pub(crate) const TEXT_SIZE: f32 = 13.0;
 pub const ROW_HEIGHT: f32 = 22.0;
 const INDENT: f32 = 12.0;
+/// The disclosure marker's own column (§167). Wider than the `>` it holds, because that column is
+/// a button now — the one that opens a branch without moving the files pane — and a glyph-sized
+/// target is one a pointer misses.
+const MARKER_WIDTH: f32 = 14.0;
 
 /// The header's padding and the height of one wrapped line of the path (§22). The path can
 /// be any length, so the header is no longer a fixed height — it grows a line at a time as
@@ -324,9 +328,25 @@ fn row_view<'a>(
 	};
 	let is_selected = selected == Some(row.path.as_str());
 
+	// The marker is its own click target (§167): pressing it opens or closes the branch, pressing
+	// the name shows the folder in the files pane, and each is ONE listing. It is given a whole
+	// column of width rather than the glyph's own, because a single `>` is too small to hit.
+	// A right press carries no handler of its own here, so it falls through to the row's menu.
+	let toggle = mouse_area(
+		container(text(marker).size(TEXT_SIZE).color(MUTED_FG))
+			.width(Length::Fixed(MARKER_WIDTH))
+			.height(Length::Fixed(ROW_HEIGHT))
+			.align_x(Horizontal::Center)
+			.align_y(Vertical::Center),
+	)
+	.on_press(Message::Explorer(ExplorerMessage::ToggleClicked(
+		row.path.clone(),
+	)))
+	.interaction(mouse::Interaction::Pointer);
+
 	let label = iced::widget::row![
 		container(text("")).width(indent),
-		text(marker).size(TEXT_SIZE).color(MUTED_FG),
+		toggle,
 		text(row.name).size(TEXT_SIZE).color(FG),
 	]
 	.spacing(6)

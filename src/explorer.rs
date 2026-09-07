@@ -37,8 +37,17 @@ pub enum ExplorerMessage {
 	Toggled,
 	/// Show or hide dot-prefixed folders (the pane header's toggle).
 	HiddenToggled,
-	/// A row was left-clicked: select it and open/close it.
+	/// A folder's NAME was left-clicked: select it and show it in the files pane (§167).
+	///
+	/// It deliberately does not open the branch. The two clicks a row offers ask two different
+	/// questions — "show me what is in here" and "show me the folders under here" — and each is
+	/// one listing. Answering both from one click made every navigation walk the directory TWICE,
+	/// which on a folder of 105,610 entries over a link with latency was two 1,057-trip walks
+	/// contending with each other.
 	RowClicked(String),
+	/// The disclosure marker was left-clicked: open or close the branch (§167). The files pane
+	/// stays where it is — see [`RowClicked`](Self::RowClicked).
+	ToggleClicked(String),
 	/// A row was right-clicked: select it and open the context menu on it.
 	RowRightClicked(String),
 	/// The pointer moved over the pane; the payload is its pane-local position. Tracked

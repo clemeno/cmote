@@ -317,16 +317,24 @@ impl Tab {
 			}
 			ExplorerMessage::PanePressed => self.focus_pane(Focus::Tree),
 			ExplorerMessage::Scrolled(offset) => self.panes.tree.set_scroll(offset),
+			// Clicking a folder's NAME points the files pane at it, WITHOUT moving the shell —
+			// that is what makes the pane usable to look inside a folder you are not in (§19) —
+			// and without opening the branch, which is the marker's job (§167). One click, one
+			// listing: this used to do both, so every navigation walked the directory twice.
 			ExplorerMessage::RowClicked(path) => {
+				self.focus_pane(Focus::Tree);
+				// `toggle_node` used to do this on the way past; the selection is the row's own
+				// answer to being clicked, so it is made here explicitly now.
+				self.panes.tree.select(&path);
+				if let Some(request) = self.panes.pane.show(&path) {
+					self.list_files(request);
+				}
+			}
+			// And the marker opens or closes the branch, leaving the files pane where it is (§167).
+			ExplorerMessage::ToggleClicked(path) => {
 				self.focus_pane(Focus::Tree);
 				if let Some(fetch) = self.panes.tree.toggle_node(&path) {
 					self.send_command(SshCommand::ListDir(fetch));
-				}
-				// Clicking a folder in the tree also points the files pane at it, WITHOUT
-				// moving the shell — that is what makes the pane usable to look inside a
-				// folder you are not in (§19).
-				if let Some(request) = self.panes.pane.show(&path) {
-					self.list_files(request);
 				}
 			}
 			ExplorerMessage::RowRightClicked(path) => {
@@ -937,6 +945,62 @@ impl Tab {
 mod tests {
 	use super::super::fixtures::*;
 	use super::super::*;
+
+	/// The two clicks a tree row offers each cost ONE listing (§167).
+	///
+	/// They used to be one click doing both jobs, so every navigation asked the server to walk the
+	/// same directory twice — once for the pane's rows and once for the branch's subfolders. On a
+	/// folder of 105,610 entries over a link with latency that was two 1,057-round-trip walks
+	/// contending with each other: the pane's own listing landed at 19.1 s where one walk took 8.7.
+	#[test]
+	fn a_name_click_lists_only_the_pane_and_a_marker_click_only_the_tree() {
+		let (mut app, mut rx) = dialing_tab("u@h:22", 64);
+		let _task = app.on_ssh_event(SshEvent::Connected);
+		let _opening = drain(&mut rx);
+
+		// The name: the files pane goes there, and nothing asks for the branch's subfolders.
+		let _task = app.on_explorer(ExplorerMessage::RowClicked("/var".to_owned()));
+		let commands = drain(&mut rx);
+		assert_eq!(app.panes.pane.path(), Some("/var"), "the pane went");
+		assert_eq!(
+			app.panes.tree.selected(),
+			Some("/var"),
+			"and the row is selected, which `toggle_node` used to do on the way past"
+		);
+		assert!(
+			commands
+				.iter()
+				.any(|command| matches!(command, SshCommand::ListFiles { .. })),
+			"the pane's rows were asked for: {commands:?}"
+		);
+		assert!(
+			!commands
+				.iter()
+				.any(|command| matches!(command, SshCommand::ListDir(_))),
+			"and the tree's subfolders were NOT — that is the second walk: {commands:?}"
+		);
+
+		// The marker: the branch opens, and the pane stays put.
+		let _task = app.on_explorer(ExplorerMessage::ToggleClicked("/etc".to_owned()));
+		let commands = drain(&mut rx);
+		assert_eq!(
+			app.panes.pane.path(),
+			Some("/var"),
+			"the pane did not follow the marker"
+		);
+		assert!(
+			commands
+				.iter()
+				.any(|command| matches!(command, SshCommand::ListDir(path) if path == "/etc")),
+			"the branch's subfolders were asked for: {commands:?}"
+		);
+		assert!(
+			!commands
+				.iter()
+				.any(|command| matches!(command, SshCommand::ListFiles { .. })),
+			"and the pane's rows were not: {commands:?}"
+		);
+	}
 
 	/// A first connection asks the server where the login shell stands, and opens both panes there
 	/// (§160). The prompt reads `~` from its very first line; the panes read `/`, which on any
