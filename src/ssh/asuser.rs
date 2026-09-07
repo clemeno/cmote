@@ -480,7 +480,16 @@ impl Runner {
 /// connection, shell commands, or nothing at all (§46).
 pub enum Browse {
 	/// The typed listing — a directory is a directory because the server said so.
-	Sftp(Arc<RawSftpSession>),
+	///
+	/// The same account's `runner` rides along (§167) for the one question a shell answers in a
+	/// single round trip where SFTP cannot: "which of this folder's children are folders?" SFTP has
+	/// no directories-only filter, so answering it means reading every name — 19.7 MiB, measured,
+	/// on a folder of 106,382 — where `find -type d` returns a few hundred bytes. It is the same
+	/// runner `fall_back` hands out, so it costs nothing to carry and reads as the same account.
+	Sftp {
+		sftp: Arc<RawSftpSession>,
+		runner: Runner,
+	},
 	/// `ls` under the elevation. Text, so it is a guess about types and carries no metadata.
 	Shell(Runner),
 	/// There is no account to read as — it has just gone away. Distinct from a shell fallback whose
@@ -626,12 +635,18 @@ impl Accounts {
 			return Browse::Denied(denied.clone());
 		}
 		if let Some(sftp) = entry.sftp.as_ref() {
-			return Browse::Sftp(sftp.clone());
+			return Browse::Sftp {
+				sftp: sftp.clone(),
+				runner: entry.runner.clone(),
+			};
 		}
 		match entry.open_raw(session).await {
 			Ok(sftp) => {
 				entry.sftp = Some(sftp.clone());
-				Browse::Sftp(sftp)
+				Browse::Sftp {
+					sftp,
+					runner: entry.runner.clone(),
+				}
 			}
 			Err(reason) => Browse::Shell(entry.fall_back(reason)),
 		}

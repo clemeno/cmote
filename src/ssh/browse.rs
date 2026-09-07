@@ -42,8 +42,8 @@ use crate::files::{self, Entry, FilesKind, Meta};
 /// reading as whichever account `backend` belongs to (§46).
 pub async fn list(backend: Browse, events: &mpsc::Sender<SshEvent>, path: String) {
 	match backend {
-		Browse::Sftp(sftp) => {
-			tokio::spawn(list_sftp(sftp, path, events.clone()));
+		Browse::Sftp { sftp, runner } => {
+			tokio::spawn(list_sftp(sftp, runner, path, events.clone()));
 		}
 		Browse::Shell(runner) => {
 			tokio::spawn(list_shell(runner, path, events.clone()));
@@ -62,7 +62,7 @@ pub async fn list_all(
 	request: u64,
 ) {
 	match backend {
-		Browse::Sftp(sftp) => {
+		Browse::Sftp { sftp, .. } => {
 			tokio::spawn(all_sftp(sftp, path, request, events.clone()));
 		}
 		Browse::Shell(runner) => {
@@ -75,7 +75,7 @@ pub async fn list_all(
 /// Rename a folder on the server, reporting `RenameDone` or `RenameFailed`.
 pub async fn rename(backend: Browse, events: &mpsc::Sender<SshEvent>, from: String, to: String) {
 	match backend {
-		Browse::Sftp(sftp) => {
+		Browse::Sftp { sftp, .. } => {
 			tokio::spawn(rename_sftp(sftp, from, to, events.clone()));
 		}
 		Browse::Shell(runner) => {
@@ -90,7 +90,7 @@ pub async fn rename(backend: Browse, events: &mpsc::Sender<SshEvent>, from: Stri
 /// Create a new folder on the server, reporting `MakeDirDone` or `MakeDirFailed` (§18).
 pub async fn make_dir(backend: Browse, events: &mpsc::Sender<SshEvent>, path: String) {
 	match backend {
-		Browse::Sftp(sftp) => {
+		Browse::Sftp { sftp, .. } => {
 			tokio::spawn(make_dir_sftp(sftp, path, events.clone()));
 		}
 		Browse::Shell(runner) => {
@@ -108,7 +108,7 @@ pub async fn make_dir(backend: Browse, events: &mpsc::Sender<SshEvent>, path: St
 /// the shell fallback a single `rm -rf`.
 pub async fn remove(backend: Browse, events: &mpsc::Sender<SshEvent>, paths: Vec<String>) {
 	match backend {
-		Browse::Sftp(sftp) => {
+		Browse::Sftp { sftp, .. } => {
 			tokio::spawn(remove_sftp(sftp, paths, events.clone()));
 		}
 		Browse::Shell(runner) => {
@@ -121,12 +121,97 @@ pub async fn remove(backend: Browse, events: &mpsc::Sender<SshEvent>, paths: Vec
 }
 
 /// The SFTP listing: ask for the directory's entries and keep the ones that are folders.
-async fn list_sftp(sftp: Arc<RawSftpSession>, path: String, events: mpsc::Sender<SshEvent>) {
-	match read_dirs(&sftp, &path).await {
+async fn list_sftp(
+	sftp: Arc<RawSftpSession>,
+	runner: Runner,
+	path: String,
+	events: mpsc::Sender<SshEvent>,
+) {
+	match dirs_inside(&sftp, &runner, &path).await {
 		Ok(dirs) => {
 			let _ = events.send(SshEvent::DirListed { path, dirs }).await;
 		}
 		Err(error) => fail_dir(&events, path, format!("{error}")).await,
+	}
+}
+
+/// How many waves of the SFTP walk are read before the shell is asked instead (§167).
+///
+/// Neither way is faster than the other for every folder, so the choice is made by WATCHING rather
+/// than guessing. A small folder answers in one wave over the SFTP channel that is already open —
+/// measured at 0.32-0.53 s for the folders along one path — while `find` needs a channel of its
+/// own, and a channel open plus exec plus close is two or three round trips, so asking the shell
+/// first would make every ordinary tree click about twice as slow.
+///
+/// A folder that has not finished after this many waves is a folder where the walk is the wrong
+/// tool: `.../processed` took 11.6 s of it, against roughly a second for `find`. So the walk starts,
+/// and if a second wave arrives — the folder holds more than one wave's worth of names — it is
+/// abandoned and the question asked the other way. The waves already read are not wasted work
+/// avoided: they are the round trip the walk would have cost anyway.
+const WALK_WAVES_BEFORE_FIND: usize = 2;
+
+/// The folder names inside `path`, by whichever route suits the folder's size (§167).
+///
+/// The SFTP walk answers small folders in one round trip and huge ones in eleven seconds; `find`
+/// answers any folder in about one, having paid for a channel. So the walk goes first and gives way
+/// once the folder proves big — see `WALK_WAVES_BEFORE_FIND`.
+///
+/// `find` is not trusted to exist: a server without it, or one where `-L` met a symlink loop, exits
+/// non-zero, and then the walk finishes the job. That costs the abandoned waves twice over on such
+/// a server, which is the price of not asking every server up front whether it has `find`.
+///
+/// `ponytail:` and that answer is not remembered. A server with no `find` pays the wasted waves on
+/// every crowded tree click rather than once per connection. `asuser::Accounts` is where such things
+/// are learned and cached (it already remembers where `sftp-server` lives and whether sudo wants a
+/// password); worth adding a third if a server without `find` ever turns up in practice.
+async fn dirs_inside(
+	sftp: &Arc<RawSftpSession>,
+	runner: &Runner,
+	path: &str,
+) -> Result<Vec<String>> {
+	let (waves, mut landing) = mpsc::channel(1);
+	let producer = tokio::spawn({
+		let sftp = Arc::clone(sftp);
+		let path = path.to_owned();
+		async move { stream_names(&sftp, &path, &waves).await }
+	});
+
+	// Read up to the budget, and notice the wave that arrives AFTER it: that arrival is the whole
+	// signal. A folder that ends within the budget closes the channel instead, so a folder whose
+	// names finish exactly on the last allowed wave still counts as answered by the walk.
+	let mut read: Vec<Vec<File>> = Vec::new();
+	let mut overflowed = false;
+	while let Some(wave) = landing.recv().await {
+		if read.len() >= WALK_WAVES_BEFORE_FIND {
+			overflowed = true;
+			break;
+		}
+		read.push(wave);
+	}
+
+	if !overflowed {
+		return match producer.await {
+			Ok(Ok(())) => keep_dirs(sftp, path, read.concat()).await,
+			Ok(Err(failure)) => Err(failure),
+			Err(join) => {
+				Err(anyhow::Error::new(join)).with_context(|| format!("Could not list {path}"))
+			}
+		};
+	}
+
+	// Big enough that reading every name is the wrong way to find the folders. Dropping the
+	// receiver is what stops the walk — `stream_names` sees the send fail and winds down, closing
+	// the directory handle on its way out, which aborting the task would have skipped.
+	drop(landing);
+	match shellfs::dirs_via_find(runner, path).await {
+		Ok(dirs) => Ok(dirs),
+		// No `find` on this server, or `-L` met a symlink loop. The walk is slow here, but slow is
+		// the whole answer and this is the only way left to get it.
+		Err(error) => {
+			eprintln!("find unavailable for {path}, walking it instead: {error:#}");
+			let files = read_names(sftp, path).await?;
+			keep_dirs(sftp, path, files).await
+		}
 	}
 }
 
@@ -251,19 +336,26 @@ async fn stream_names(
 	}
 }
 
-/// The folder names inside `path`. A symlink's own type says nothing about what it
-/// points at, so each one is stat'ed (which follows it) and kept only if the target is a
-/// directory — a round trip per symlink, and only per symlink.
+/// Which of `files` are folders — the names the tree wants, out of a walk already read.
+///
+/// A symlink's own type says nothing about what it points at, so each one is stat'ed (which follows
+/// it) and kept only if the target is a directory — a round trip per symlink, and only per symlink.
+/// `shellfs::dirs_via_find` answers the same question in one round trip with `-L`, which is why
+/// `dirs_inside` prefers it once a folder turns out to be big.
 ///
 /// Those stats go out in waves of `READDIR_WINDOW` too (§167), for the same reason the `readdir`s
 /// do: awaited one at a time, a folder holding fifty symlinks cost fifty round trips *in series*,
 /// which on a link measured at 316 ms is sixteen seconds to answer "which of these are folders".
 /// A real directory still costs nothing extra — only symlinks are asked about at all — and the
 /// order the answers come back in does not matter, since `Explorer::listed` sorts the children.
-async fn read_dirs(sftp: &Arc<RawSftpSession>, path: &str) -> Result<Vec<String>> {
+async fn keep_dirs(
+	sftp: &Arc<RawSftpSession>,
+	path: &str,
+	files: Vec<File>,
+) -> Result<Vec<String>> {
 	let mut dirs = Vec::new();
 	let mut links = Vec::new();
-	for file in read_names(sftp, path).await? {
+	for file in files {
 		if file.attrs.is_dir() {
 			dirs.push(file.filename);
 		} else if file.attrs.is_symlink() {
@@ -568,7 +660,7 @@ async fn remove_subtree(sftp: &Arc<RawSftpSession>, root: &str) -> Result<()> {
 pub fn read_link(backend: Browse, events: &mpsc::Sender<SshEvent>, path: String) {
 	let events = events.clone();
 	match backend {
-		Browse::Sftp(sftp) => {
+		Browse::Sftp { sftp, .. } => {
 			tokio::spawn(async move {
 				let Ok(name) = sftp.readlink(path.clone()).await else {
 					return;
@@ -628,7 +720,7 @@ pub fn probe_zone(runner: Runner, events: &mpsc::Sender<SshEvent>) {
 pub fn probe_login_dir(backend: Browse, events: &mpsc::Sender<SshEvent>) {
 	let events = events.clone();
 	match backend {
-		Browse::Sftp(sftp) => {
+		Browse::Sftp { sftp, .. } => {
 			tokio::spawn(async move {
 				let Ok(name) = sftp.realpath(".".to_owned()).await else {
 					return;

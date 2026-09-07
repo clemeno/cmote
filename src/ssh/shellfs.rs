@@ -76,6 +76,45 @@ pub async fn dirs(runner: &impl Exec, path: &str) -> Result<Vec<String>> {
 		.collect())
 }
 
+/// The folders inside `path`, asked of `find` so the SERVER does the filtering (§167).
+///
+/// This is the one question a shell answers in a single round trip where SFTP cannot: the protocol
+/// has no directories-only filter, so `read_dirs` reads every name in the folder to keep a handful
+/// — 19.7 MiB on the wire, measured, for a folder of 106,382 entries — where this returns a few
+/// hundred bytes.
+///
+/// The flags are each load-bearing:
+///
+///   * `-L` follows symlinks, so a link whose target is a directory counts as one. That is the
+///     tree's rule (`read_dirs` stats every link to decide the same thing) and NOT the pane's,
+///     which keeps a link's own kind. Without `-L` every symlinked branch would vanish.
+///   * `-mindepth 1` drops `path` itself, which `find` otherwise reports as its own first result.
+///   * `-maxdepth 1` keeps it to the children — this answers one folder, not a subtree.
+///   * `-print0` because a filename may contain a newline, and NUL is the one byte it cannot.
+///
+/// A non-zero exit is an error here rather than an empty answer, which is what lets the caller tell
+/// "this server has no `find`" from "this folder holds no folders" — with `-L`, a symlink loop also
+/// exits non-zero, and falling back to the SFTP walk is the right answer to both.
+pub async fn dirs_via_find(runner: &impl Exec, path: &str) -> Result<Vec<String>> {
+	let output = runner
+		.stdout(&format!(
+			"find -L {} -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null",
+			shell_quote(path)
+		))
+		.await?;
+	Ok(output
+		.split('\0')
+		.filter(|entry| !entry.is_empty())
+		// `find` reports full paths and the tree wants names. A name cannot contain a slash, so
+		// what follows the last one is exactly the child's name.
+		.map(|entry| match entry.rsplit_once('/') {
+			Some((_, name)) => name.to_owned(),
+			None => entry.to_owned(),
+		})
+		.filter(|name| !name.is_empty())
+		.collect())
+}
+
 /// Every entry inside `path`, for the files pane (§19).
 ///
 /// `ls -1AF` marks the type: `/` a directory, `@` a symlink, and `*`/`|`/`=` an executable, fifo or
@@ -878,6 +917,55 @@ mod backend_tests {
 		// beginning with a dash being read as an option.
 		assert_eq!(remote.only_command(), "ls -1Ap -- '/etc'");
 		assert_eq!(dirs, vec!["bin".to_owned(), "nginx".to_owned()]);
+	}
+
+	/// The tree's other listing: `find` does the filtering, so a crowded folder costs a few hundred
+	/// bytes instead of every name in it (§167).
+	#[tokio::test]
+	async fn find_asks_the_server_to_filter_and_keeps_only_the_child_names() {
+		// `find` reports full paths, NUL-separated, and the tree wants names.
+		let remote = Script::saying("/etc/bin\0/etc/nginx\0");
+		let dirs = dirs_via_find(&remote, "/etc")
+			.await
+			.expect("the listing arrived");
+
+		// Every flag is load-bearing: `-L` so a symlink to a directory counts (the tree's rule),
+		// `-mindepth 1` so `/etc` itself is not its own child, `-maxdepth 1` so this answers one
+		// folder rather than a subtree, `-print0` because a name may contain a newline.
+		assert_eq!(
+			remote.only_command(),
+			"find -L '/etc' -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null"
+		);
+		assert_eq!(dirs, vec!["bin".to_owned(), "nginx".to_owned()]);
+	}
+
+	/// A name with a newline in it survives, which is the whole reason for `-print0` (§167).
+	#[tokio::test]
+	async fn a_newline_in_a_folder_name_is_not_two_folders() {
+		let remote = Script::saying("/srv/two\nlines\0/srv/plain\0");
+		let dirs = dirs_via_find(&remote, "/srv")
+			.await
+			.expect("the listing arrived");
+		assert_eq!(dirs, vec!["two\nlines".to_owned(), "plain".to_owned()]);
+	}
+
+	/// A server with no `find` must be distinguishable from a folder holding no folders (§167) —
+	/// the caller falls back to the SFTP walk on the first and shows nothing on the second.
+	#[tokio::test]
+	async fn a_refused_find_is_an_error_and_not_an_empty_listing() {
+		let remote = Script::refusing();
+		assert!(
+			dirs_via_find(&remote, "/etc").await.is_err(),
+			"a non-zero exit is an error, not an answer"
+		);
+
+		let empty = Script::saying("");
+		assert_eq!(
+			dirs_via_find(&empty, "/etc")
+				.await
+				.expect("it ran, and found nothing"),
+			Vec::<String>::new()
+		);
 	}
 
 	/// The pane's listing reads the TYPE off the suffix `ls -F` puts there (§19).
