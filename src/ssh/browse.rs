@@ -221,21 +221,45 @@ async fn read_names(sftp: &Arc<RawSftpSession>, path: &str) -> Result<Vec<File>>
 
 /// The folder names inside `path`. A symlink's own type says nothing about what it
 /// points at, so each one is stat'ed (which follows it) and kept only if the target is a
-/// directory — that costs a round trip per symlink, and only per symlink.
+/// directory — a round trip per symlink, and only per symlink.
+///
+/// Those stats go out in waves of `READDIR_WINDOW` too (§167), for the same reason the `readdir`s
+/// do: awaited one at a time, a folder holding fifty symlinks cost fifty round trips *in series*,
+/// which on a link measured at 316 ms is sixteen seconds to answer "which of these are folders".
+/// A real directory still costs nothing extra — only symlinks are asked about at all — and the
+/// order the answers come back in does not matter, since `Explorer::listed` sorts the children.
 async fn read_dirs(sftp: &Arc<RawSftpSession>, path: &str) -> Result<Vec<String>> {
 	let mut dirs = Vec::new();
+	let mut links = Vec::new();
 	for file in read_names(sftp, path).await? {
-		// `||` short-circuits, so a real directory costs nothing extra; only a symlink
-		// pays the stat. A broken link errors there and is simply left out, which is
-		// what it is.
-		let is_dir = file.attrs.is_dir()
-			|| (file.attrs.is_symlink()
-				&& sftp
-					.stat(join(path, &file.filename))
-					.await
-					.is_ok_and(|attrs| attrs.attrs.is_dir()));
-		if is_dir {
+		if file.attrs.is_dir() {
 			dirs.push(file.filename);
+		} else if file.attrs.is_symlink() {
+			links.push(file.filename);
+		}
+	}
+
+	// Bounded by the same window rather than "all of them at once": a directory of ten thousand
+	// symlinks would otherwise put ten thousand requests on the wire in one breath.
+	for wave_names in links.chunks(READDIR_WINDOW) {
+		let mut wave = tokio::task::JoinSet::new();
+		for name in wave_names {
+			let sftp = Arc::clone(sftp);
+			let target = join(path, name);
+			let name = name.clone();
+			// A broken link errors here and is simply left out, which is what it is.
+			wave.spawn(async move {
+				let is_dir = sftp
+					.stat(target)
+					.await
+					.is_ok_and(|attrs| attrs.attrs.is_dir());
+				(name, is_dir)
+			});
+		}
+		while let Some(joined) = wave.join_next().await {
+			if let Ok((name, true)) = joined {
+				dirs.push(name);
+			}
 		}
 	}
 	Ok(dirs)
