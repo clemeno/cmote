@@ -1006,10 +1006,20 @@ impl Files {
 		self.request
 	}
 
-	/// A batch of entries came back. Already sorted by the server task (which has the
-	/// whole listing in hand), so batches simply append and the order holds across them.
-	/// A batch for a directory we have left is dropped, and so are `.` and `..` — every
-	/// other name lands, whatever it starts with, because the toggle is what hides things.
+	/// A batch of entries came back. Batches append as they land and the whole listing is put in
+	/// display order once, when the last one says so (§167). A batch for a directory we have left
+	/// is dropped, and so are `.` and `..` — every other name lands, whatever it starts with,
+	/// because the toggle is what hides things.
+	///
+	/// The sort is here rather than in the server task because the batches no longer arrive in
+	/// order: the remote listing is streamed as each group of `readdir` replies lands, so the pane
+	/// can start drawing after one round trip instead of after all of them, and a server returns
+	/// names in whatever order it keeps them (hash order, on ext4). Sorting at `done` is what turns
+	/// that into the order the user reads.
+	///
+	/// It costs one sort per listing, not one per batch, and the local backend — which still hands
+	/// over a listing it sorted itself — pays almost nothing for it: `sort_by` on already-ordered
+	/// input walks the runs it finds and does about n comparisons.
 	pub fn chunk(&mut self, request: u64, entries: Vec<Entry>, done: bool) {
 		if request != self.request {
 			return;
@@ -1020,6 +1030,7 @@ impl Files {
 				.filter(|entry| !crate::explorer::is_dot_link(&entry.name)),
 		);
 		if done {
+			sort(&mut self.entries);
 			self.loading = false;
 		}
 	}
@@ -1709,6 +1720,38 @@ mod tests {
 	}
 
 	#[test]
+	fn rows_are_drawable_before_the_listing_ends_and_settle_into_order_when_it_does() {
+		// The remote listing is streamed wave by wave now (§167) so the pane can draw after one
+		// round trip instead of after all of them — on a folder of 106,382 entries that was 11.6
+		// seconds of blank pane. The price is that batches arrive in the server's order, so the
+		// display order is settled once, by the batch that says the walk is finished.
+		let mut files = Files::default();
+		let request = files.show("/home").expect("a new directory needs listing");
+
+		files.chunk(
+			request,
+			vec![
+				entry("zebra", FilesKind::File),
+				entry("apple", FilesKind::File),
+			],
+			false,
+		);
+		assert_eq!(files.count(), 2, "two rows are already drawable");
+		assert!(files.loading(), "while the walk is still running");
+		assert_eq!(
+			names(&files),
+			["zebra", "apple"],
+			"in the order the server sent them — nothing has claimed the listing is whole yet"
+		);
+
+		// The closing batch is what orders the WHOLE listing, across every wave rather than
+		// within each one — so a folder from the last wave still reaches the front.
+		files.chunk(request, vec![entry("mango", FilesKind::Dir)], true);
+		assert!(!files.loading(), "the walk is done");
+		assert_eq!(names(&files), ["mango", "apple", "zebra"]);
+	}
+
+	#[test]
 	fn the_toggle_hides_nothing_but_dot_names_and_never_shows_the_dot_links() {
 		let (files, _) = pane(&[
 			entry(".", FilesKind::Dir),
@@ -1718,13 +1761,15 @@ mod tests {
 			entry("normal", FilesKind::File),
 			entry("link", FilesKind::Link),
 		]);
-		// Everything the server listed is here except the self and parent links.
+		// Everything the server listed is here except the self and parent links. In display order,
+		// not arrival order: batches are streamed as they land now and `chunk` sorts the listing
+		// when the last one arrives (§167), so `...odd` leads — `.` sorts ahead of `h`.
 		let names: Vec<&str> = files
 			.rows(true)
 			.iter()
 			.map(|entry| entry.name.as_str())
 			.collect();
-		assert_eq!(names, vec![".hidden", "...odd", "normal", "link"]);
+		assert_eq!(names, vec!["...odd", ".hidden", "link", "normal"]);
 		assert_eq!(files.count(), 4, "the links are dropped, not just unshown");
 	}
 

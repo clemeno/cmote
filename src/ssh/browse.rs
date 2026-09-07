@@ -149,26 +149,57 @@ async fn list_sftp(sftp: Arc<RawSftpSession>, path: String, events: mpsc::Sender
 /// time stops matching `trips / WINDOW × RTT`.
 const READDIR_WINDOW: usize = 32;
 
-/// Every name the server lists inside `path`, with its attributes and its `longname`
-/// (§20) — `opendir`, then `readdir` until the server answers EOF, then `close`.
+/// Every name the server lists inside `path`, with its attributes and its `longname` (§20) —
+/// `stream_names` collected into one answer, for the caller that wants the whole directory before
+/// it does anything with it. That is the TREE: it has to know which children are folders, and a
+/// half-read listing would show a branch as childless.
 ///
 /// This is what `SftpSession::read_dir` does, minus the two things it discards: the
 /// `longname` line the owner and group names live in, and `.`/`..`, which the model
 /// drops at ingest anyway (`explorer::is_dot_link`, §19).
-///
-/// The `readdir`s go out in waves of `READDIR_WINDOW` rather than one at a time (§167). russh-sftp
-/// gives every request its own id and matches each reply to it through a map, so a session takes
-/// concurrent requests without any interleaving on our side; the directory cursor lives on the
-/// SERVER, so each reply is simply the next block, and which order the blocks come back in does not
-/// matter — the listing is sorted afterwards regardless.
 async fn read_names(sftp: &Arc<RawSftpSession>, path: &str) -> Result<Vec<File>> {
+	// Capacity 1 with the producer spawned: the waves are consumed as fast as they land here, and
+	// a bound rather than an unbounded channel is what stops a huge directory being held twice.
+	let (waves, mut landing) = mpsc::channel(1);
+	let producer = tokio::spawn({
+		let sftp = Arc::clone(sftp);
+		let path = path.to_owned();
+		async move { stream_names(&sftp, &path, &waves).await }
+	});
+
+	let mut files = Vec::new();
+	while let Some(wave) = landing.recv().await {
+		files.extend(wave);
+	}
+	match producer.await {
+		Ok(Ok(())) => Ok(files),
+		Ok(Err(failure)) => Err(failure),
+		Err(join) => {
+			Err(anyhow::Error::new(join)).with_context(|| format!("Could not list {path}"))
+		}
+	}
+}
+
+/// The same walk, handing each wave over as it lands instead of at the end (§167).
+///
+/// This is what lets the files pane fill progressively: a wave is a batch the pane can draw, and
+/// the first one arrives after a single round trip rather than after all 34 of them. `read_names`
+/// is the collecting wrapper for the caller that wants the whole answer in one piece.
+///
+/// The waves are NOT in display order — the server returns names in whatever order it keeps them,
+/// which on ext4 is hash order — so whoever consumes these has to put them in order. The pane's
+/// model does it once, when the listing is complete (`Files::chunk`).
+async fn stream_names(
+	sftp: &Arc<RawSftpSession>,
+	path: &str,
+	waves: &mpsc::Sender<Vec<File>>,
+) -> Result<()> {
 	let handle = sftp
 		.opendir(path.to_owned())
 		.await
 		.with_context(|| format!("Could not list {path}"))?
 		.handle;
 
-	let mut files = Vec::new();
 	let mut done = false;
 	let mut failure = None;
 	while !done && failure.is_none() {
@@ -180,13 +211,10 @@ async fn read_names(sftp: &Arc<RawSftpSession>, path: &str) -> Result<Vec<File>>
 		}
 		// The whole wave is drained even once one reply has said EOF: the others were sent before
 		// anyone knew that, and the ones that came back with names came back with real ones.
-		let mut landed = 0usize;
+		let mut landed = Vec::new();
 		while let Some(joined) = wave.join_next().await {
 			match joined {
-				Ok(Ok(name)) => {
-					landed += name.files.len();
-					files.extend(name.files);
-				}
+				Ok(Ok(name)) => landed.extend(name.files),
 				// The end of the directory, not a failure: the server says EOF once it has
 				// handed over every name.
 				Ok(Err(SftpError::Status(status))) if status.status_code == StatusCode::Eof => {
@@ -206,17 +234,21 @@ async fn read_names(sftp: &Arc<RawSftpSession>, path: &str) -> Result<Vec<File>>
 		// §6.7 makes it a MUST), so a whole wave of empty replies means it never will. Stopping
 		// here keeps that server's listing short; the single `readdir` loop this replaced spun on
 		// it forever, which is the one behaviour worth not preserving.
-		if landed == 0 {
+		if landed.is_empty() {
 			done = true;
+		} else if waves.send(landed).await.is_err() {
+			// Nobody is listening any more — the pane has left this directory. Stop walking it
+			// rather than reading a hundred thousand names for a receiver that is gone.
+			break;
 		}
 	}
 	// Give the handle back before leaving, on the way out of a failure as much as a success; a
 	// server has a finite number of them.
 	let _ = sftp.close(handle).await;
-	if let Some(failure) = failure {
-		return Err(failure).with_context(|| format!("Could not list {path}"));
+	match failure {
+		Some(failure) => Err(failure).with_context(|| format!("Could not list {path}")),
+		None => Ok(()),
 	}
-	Ok(files)
 }
 
 /// The folder names inside `path`. A symlink's own type says nothing about what it
@@ -265,44 +297,85 @@ async fn read_dirs(sftp: &Arc<RawSftpSession>, path: &str) -> Result<Vec<String>
 	Ok(dirs)
 }
 
-/// The SFTP listing for the files pane: every entry, sorted, then cut into batches.
+/// The SFTP listing for the files pane: every entry, sent on as each wave lands (§167).
 ///
-/// `ponytail:` the batching bounds the MESSAGE size and the relayout, not the fetch —
-/// russh-sftp's `read_dir` runs the whole readdir loop before it returns. That costs
-/// nothing extra in round trips (SFTP sends a name's attributes along with the name, so
-/// there is no per-file stat either way) but it does hold the whole listing in memory
-/// once. Upgrade path: drive `RawSftpSession::opendir`/`readdir` directly and emit a
-/// batch per protocol packet.
+/// The pane used to get nothing until the whole directory had arrived, been sorted and been cut
+/// into batches. On a folder of 106,382 entries that was 11.6 seconds of blank pane — the walk is
+/// bandwidth-bound at that size, so the wait cannot be made shorter, but it can be made VISIBLE:
+/// a wave is already a batch the pane can draw, and the first lands after one round trip.
+///
+/// The listing therefore arrives out of display order, and the model sorts once at `done`
+/// (`Files::chunk`) rather than the backend sorting before it sends. Rows appear in the server's
+/// order and settle into display order when the listing completes.
+///
+/// `ponytail:` that settling is one visible reshuffle at the end. The alternative is a model that
+/// merges each wave into sorted position, so the list is ordered at every instant and rows appear
+/// mid-list as it grows — more code in `Files`, and a sort per wave instead of one. Worth building
+/// if the single reshuffle proves more annoying than rows moving continuously would be.
 async fn all_sftp(
 	sftp: Arc<RawSftpSession>,
 	path: String,
 	request: u64,
 	events: mpsc::Sender<SshEvent>,
 ) {
-	match read_entries(&sftp, &path).await {
-		Ok(mut entries) => {
-			files::sort(&mut entries);
-			send_batches(&events, request, entries).await;
+	let (waves, mut landing) = mpsc::channel(1);
+	let producer = tokio::spawn({
+		let sftp = Arc::clone(&sftp);
+		let path = path.clone();
+		async move { stream_names(&sftp, &path, &waves).await }
+	});
+
+	while let Some(wave) = landing.recv().await {
+		// Cut to `files::BATCH` on the way out: a wave is up to `READDIR_WINDOW` × 100 names, and
+		// the batch size is what bounds ONE message rather than what bounds the fetch.
+		let entries: Vec<Entry> = wave.into_iter().map(entry_of).collect();
+		for batch in entries.chunks(files::BATCH) {
+			// Never `done` here — the walk says when it is finished, not the last full wave.
+			let delivered = events
+				.send(SshEvent::FilesChunk {
+					request,
+					entries: batch.to_vec(),
+					done: false,
+				})
+				.await
+				.is_ok();
+			if !delivered {
+				return;
+			}
 		}
-		Err(error) => fail_files(&events, request, format!("{error}")).await,
+	}
+
+	match producer.await {
+		// One empty batch closes the listing. It is what tells an EMPTY directory to stop waiting
+		// too, so the same message ends both cases and neither needs a rule of its own.
+		Ok(Ok(())) => {
+			let _ = events
+				.send(SshEvent::FilesChunk {
+					request,
+					entries: Vec::new(),
+					done: true,
+				})
+				.await;
+		}
+		// A failure after some waves have already gone leaves those rows on screen with the reason
+		// on the notice line — which is the honest report. What must not happen is a short listing
+		// presented as a whole one, and `FilesFailed` is what stops that.
+		Ok(Err(error)) => fail_files(&events, request, format!("{error}")).await,
+		Err(join) => {
+			let reason = format!("The listing did not finish: {join}");
+			fail_files(&events, request, reason).await;
+		}
 	}
 }
 
-/// Every entry inside `path`, with the kind and the details the server reported (§19,
-/// §20). A symlink keeps its own kind rather than being followed: resolving each one
-/// costs a round trip, and a crowded directory is exactly where that adds up — the pane
-/// asks for the one link the user selects instead (`read_link`).
-async fn read_entries(sftp: &Arc<RawSftpSession>, path: &str) -> Result<Vec<Entry>> {
-	Ok(read_names(sftp, path)
-		.await?
-		.into_iter()
-		.map(entry_of)
-		.collect())
-}
-
-/// Turn one listed name into a pane entry (§20). The size, time and ids ride along with
+/// Turn one listed name into a pane entry (§19, §20). The size, time and ids ride along with
 /// the name — SFTP sends a directory's attributes with its listing, so none of this costs
 /// an extra round trip.
+///
+/// A symlink keeps its own kind rather than being followed: resolving each one costs a round trip,
+/// and a crowded directory is exactly where that adds up — the pane asks for the one link the user
+/// selects instead (`read_link`). That is the opposite of what the TREE does a few functions up,
+/// and deliberately so: the tree has to know whether a link is a branch it can open.
 fn entry_of(file: File) -> Entry {
 	let kind = if file.attrs.is_dir() {
 		FilesKind::Dir
