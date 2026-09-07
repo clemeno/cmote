@@ -130,13 +130,38 @@ async fn list_sftp(sftp: Arc<RawSftpSession>, path: String, events: mpsc::Sender
 	}
 }
 
+/// How many `readdir` requests ride the wire at once (§167).
+///
+/// One `readdir` reply carries at most 100 names on OpenSSH (`MAX_READDIR_NAMES`), whatever the
+/// packet size allows — so a directory of 105,610 forces 1,057 of them, and that number is the
+/// server's to choose, not ours. Awaited one at a time it is 1,057 round trips *in series*:
+/// measured at 316 ms each over a link with latency, which is 334 SECONDS to open one folder, with
+/// the link otherwise idle the whole time. Sent as a wave they cost one round trip per WINDOW.
+///
+/// 32 is chosen against the round trip, not the directory: it takes the same folder to about 34
+/// waves, and the remaining cost is the data itself rather than the waiting. Raising it further
+/// buys progressively less and asks the server for more outstanding requests than a conservative
+/// one may want to hold.
+///
+/// `ponytail:` a wave is a barrier — the whole 32 land before the next 32 are sent, so one slow
+/// reply idles the rest of the window. A sliding window that keeps 32 in flight at all times would
+/// recover that, at the price of tracking completions individually. Worth it only if the measured
+/// time stops matching `trips / WINDOW × RTT`.
+const READDIR_WINDOW: usize = 32;
+
 /// Every name the server lists inside `path`, with its attributes and its `longname`
 /// (§20) — `opendir`, then `readdir` until the server answers EOF, then `close`.
 ///
 /// This is what `SftpSession::read_dir` does, minus the two things it discards: the
 /// `longname` line the owner and group names live in, and `.`/`..`, which the model
 /// drops at ingest anyway (`explorer::is_dot_link`, §19).
-async fn read_names(sftp: &RawSftpSession, path: &str) -> Result<Vec<File>> {
+///
+/// The `readdir`s go out in waves of `READDIR_WINDOW` rather than one at a time (§167). russh-sftp
+/// gives every request its own id and matches each reply to it through a map, so a session takes
+/// concurrent requests without any interleaving on our side; the directory cursor lives on the
+/// SERVER, so each reply is simply the next block, and which order the blocks come back in does not
+/// matter — the listing is sorted afterwards regardless.
+async fn read_names(sftp: &Arc<RawSftpSession>, path: &str) -> Result<Vec<File>> {
 	let handle = sftp
 		.opendir(path.to_owned())
 		.await
@@ -144,27 +169,60 @@ async fn read_names(sftp: &RawSftpSession, path: &str) -> Result<Vec<File>> {
 		.handle;
 
 	let mut files = Vec::new();
-	loop {
-		match sftp.readdir(handle.as_str()).await {
-			Ok(name) => files.extend(name.files),
-			// The end of the directory, not a failure: the server says EOF once it has
-			// handed over every name.
-			Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => break,
-			Err(error) => {
-				// Give the handle back before leaving; a server has a finite number.
-				let _ = sftp.close(handle).await;
-				return Err(error).with_context(|| format!("Could not list {path}"));
+	let mut done = false;
+	let mut failure = None;
+	while !done && failure.is_none() {
+		let mut wave = tokio::task::JoinSet::new();
+		for _ in 0..READDIR_WINDOW {
+			let sftp = Arc::clone(sftp);
+			let handle = handle.clone();
+			wave.spawn(async move { sftp.readdir(handle).await });
+		}
+		// The whole wave is drained even once one reply has said EOF: the others were sent before
+		// anyone knew that, and the ones that came back with names came back with real ones.
+		let mut landed = 0usize;
+		while let Some(joined) = wave.join_next().await {
+			match joined {
+				Ok(Ok(name)) => {
+					landed += name.files.len();
+					files.extend(name.files);
+				}
+				// The end of the directory, not a failure: the server says EOF once it has
+				// handed over every name.
+				Ok(Err(SftpError::Status(status))) if status.status_code == StatusCode::Eof => {
+					done = true;
+				}
+				// A real error must FAIL the listing rather than end it — a directory shown short
+				// of what it holds, with no sign that anything is missing, is the one outcome
+				// worse than an error message. The remaining replies are still drained first so
+				// the wave's tasks are not left aborting mid-flight.
+				Ok(Err(error)) => {
+					failure = Some(anyhow::Error::new(error));
+				}
+				Err(join) => failure = Some(anyhow::Error::new(join)),
 			}
 		}
+		// A conformant server answers EOF when a directory runs out (draft-ietf-secsh-filexfer-02
+		// §6.7 makes it a MUST), so a whole wave of empty replies means it never will. Stopping
+		// here keeps that server's listing short; the single `readdir` loop this replaced spun on
+		// it forever, which is the one behaviour worth not preserving.
+		if landed == 0 {
+			done = true;
+		}
 	}
+	// Give the handle back before leaving, on the way out of a failure as much as a success; a
+	// server has a finite number of them.
 	let _ = sftp.close(handle).await;
+	if let Some(failure) = failure {
+		return Err(failure).with_context(|| format!("Could not list {path}"));
+	}
 	Ok(files)
 }
 
 /// The folder names inside `path`. A symlink's own type says nothing about what it
 /// points at, so each one is stat'ed (which follows it) and kept only if the target is a
 /// directory — that costs a round trip per symlink, and only per symlink.
-async fn read_dirs(sftp: &RawSftpSession, path: &str) -> Result<Vec<String>> {
+async fn read_dirs(sftp: &Arc<RawSftpSession>, path: &str) -> Result<Vec<String>> {
 	let mut dirs = Vec::new();
 	for file in read_names(sftp, path).await? {
 		// `||` short-circuits, so a real directory costs nothing extra; only a symlink
@@ -210,7 +268,7 @@ async fn all_sftp(
 /// §20). A symlink keeps its own kind rather than being followed: resolving each one
 /// costs a round trip, and a crowded directory is exactly where that adds up — the pane
 /// asks for the one link the user selects instead (`read_link`).
-async fn read_entries(sftp: &RawSftpSession, path: &str) -> Result<Vec<Entry>> {
+async fn read_entries(sftp: &Arc<RawSftpSession>, path: &str) -> Result<Vec<Entry>> {
 	Ok(read_names(sftp, path)
 		.await?
 		.into_iter()
@@ -353,7 +411,7 @@ async fn remove_sftp(
 /// Remove one entry whatever it is (§18). A symlink is seen by `lstat` as itself and unlinked
 /// with `remove`, NEVER followed — following it would delete whatever it points at. A plain file
 /// is unlinked the same way; a real directory is emptied and then removed by `remove_subtree`.
-async fn remove_tree(sftp: &RawSftpSession, root: &str) -> Result<()> {
+async fn remove_tree(sftp: &Arc<RawSftpSession>, root: &str) -> Result<()> {
 	let attrs = sftp
 		.lstat(root.to_owned())
 		.await
@@ -373,7 +431,7 @@ async fn remove_tree(sftp: &RawSftpSession, root: &str) -> Result<()> {
 /// and `files`, then the files are unlinked and the directories removed DEEPEST FIRST — a
 /// directory only goes once nothing inside it is left. A symlink to a folder is a file here (its
 /// own `lstat` type is a link), so it is unlinked, not descended into.
-async fn remove_subtree(sftp: &RawSftpSession, root: &str) -> Result<()> {
+async fn remove_subtree(sftp: &Arc<RawSftpSession>, root: &str) -> Result<()> {
 	let mut dirs = vec![root.to_owned()];
 	let mut files: Vec<String> = Vec::new();
 	let mut frontier = vec![root.to_owned()];
