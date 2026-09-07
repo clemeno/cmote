@@ -411,6 +411,36 @@ async fn session_task(
 	}
 }
 
+/// russh's own algorithm preferences, with compression asked for ahead of none (§167).
+///
+/// Everything here is russh's `DEFAULT` except the compression list. Its default puts `NONE` first
+/// (`negotiation::COMPRESSION_ORDER`), so the connection negotiates no compression at all — and a
+/// directory listing is `ls -l`-shaped text, which is exactly what deflate is good at. Measured:
+/// one folder of 106,382 entries put **19.7 MiB** on the wire, and the link carried it at
+/// 1.70 MiB/s, so 11.6 seconds of the wait was the bytes rather than the round trips.
+///
+/// `zlib@openssh.com` is asked for first because it is the DELAYED variant: the server turns
+/// compression on only after authentication succeeds, so nothing sent while authenticating — the
+/// password, the key exchange — is ever fed through a compressor. RFC 4253's plain `zlib` starts
+/// immediately and is offered only as the second choice for a server too old to know the first.
+/// `NONE` stays on the list last, so a server offering no compression still connects.
+///
+/// `ponytail:` asked for on every connection rather than per target. The trade is CPU against
+/// bytes, and which way it falls depends on the link: at 1.70 MiB/s the compressor is nowhere near
+/// the bottleneck, but on a datacentre link russh's deflate (`Compression::fast`, level 1) could
+/// become one. The upgrade path is a per-target switch, `ssh -C`'s own shape — worth building when
+/// a fast connection is measured going SLOWER with this on, and not before.
+fn compressed_preferences() -> russh::Preferred {
+	russh::Preferred {
+		compression: std::borrow::Cow::Borrowed(&[
+			russh::compression::ZLIB_LEGACY,
+			russh::compression::ZLIB,
+			russh::compression::NONE,
+		]),
+		..russh::Preferred::DEFAULT
+	}
+}
+
 /// Connect, gate the host key, authenticate, open a shell, and pump bytes until
 /// the session ends.
 async fn connect_and_run(
@@ -423,6 +453,7 @@ async fn connect_and_run(
 		// No inactivity timeout: an interactive shell may sit idle for a long
 		// time and must not be dropped for being quiet.
 		inactivity_timeout: None,
+		preferred: compressed_preferences(),
 		..Default::default()
 	});
 
@@ -975,5 +1006,27 @@ impl Handler {
 			Some(rx) => rx.await.unwrap_or(HostKeyChoice::Reject),
 			None => HostKeyChoice::Reject,
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::compressed_preferences;
+
+	/// Compression is asked for, and asked for in an order that is a decision (§167).
+	///
+	/// Two things matter beyond "zlib beats none". The DELAYED variant must come first, so a server
+	/// that offers both turns the compressor on only after authentication — nothing sent while
+	/// authenticating goes through it. And `NONE` must stay on the list, or a server offering no
+	/// compression at all would have nothing in common with us and fail to negotiate.
+	#[test]
+	fn compression_is_preferred_but_never_required_and_the_delayed_one_comes_first() {
+		let offered = compressed_preferences().compression;
+		let names: Vec<&str> = offered.iter().map(AsRef::as_ref).collect();
+		assert_eq!(
+			names,
+			["zlib@openssh.com", "zlib", "none"],
+			"delayed first, then RFC 4253's immediate one, and none last as the fallback"
+		);
 	}
 }
