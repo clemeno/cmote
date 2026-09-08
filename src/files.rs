@@ -519,13 +519,7 @@ impl Files {
 			.into_iter()
 			.filter_map(|entry| {
 				path.clear();
-				path.push_str(directory);
-				// `explorer::join`'s rule, spelled out because this builds in place rather than
-				// returning: the root already ends in its slash and must not gain a second.
-				if !directory.ends_with('/') {
-					path.push('/');
-				}
-				path.push_str(&entry.name);
+				crate::explorer::join_into(&mut path, directory, &entry.name);
 				self.selected
 					.contains(path.as_str())
 					.then(|| (path.clone(), entry))

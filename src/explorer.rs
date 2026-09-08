@@ -698,11 +698,23 @@ impl Explorer {
 
 /// Join a folder path and a child name, POSIX-style, without doubling the root's slash.
 pub fn join(directory: &str, child: &str) -> String {
-	if directory.ends_with('/') {
-		format!("{directory}{child}")
-	} else {
-		format!("{directory}/{child}")
+	let mut path = String::with_capacity(directory.len() + 1 + child.len());
+	join_into(&mut path, directory, child);
+	path
+}
+
+/// The same rule, appended to a buffer the caller owns (§168).
+///
+/// `Files::selected_rows` walks every row on show building each path to test it against the
+/// selection, so it reuses ONE buffer rather than allocating a String per entry — which meant it
+/// had spelled this rule out a second time. Two copies of "the root already ends in its slash" is
+/// one too many for a rule whose whole content is an edge case.
+pub fn join_into(path: &mut String, directory: &str, child: &str) {
+	path.push_str(directory);
+	if !directory.ends_with('/') {
+		path.push('/');
 	}
+	path.push_str(child);
 }
 
 /// Whether `name` is usable as a single new folder or file name (§18): something after
