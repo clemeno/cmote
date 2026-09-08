@@ -320,6 +320,21 @@ pub struct FilesRename {
 	pub text: String,
 }
 
+/// Everything the details card prints about a multiple selection (§21, §168): how many entries,
+/// how many of those are folders, and what the FILES among them come to.
+///
+/// Three numbers rather than the selection itself, which is the whole point —
+/// [`Files::selection_totals`] answers this without building a path per selected entry. Named
+/// fields rather than a `(usize, usize, u64)`, because two of the three are counts and a caller
+/// swapping them would read perfectly well.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SelectionTotals {
+	pub items: usize,
+	pub folders: usize,
+	/// Folders excluded: a folder's size is that of its directory entry, not of its contents.
+	pub bytes: u64,
+}
+
 /// The remote file browser (§19).
 #[expect(
 	clippy::struct_excessive_bools,
@@ -503,13 +518,14 @@ impl Files {
 	/// only a hit is cloned — so a lone selection in a crowded folder no longer allocates a string
 	/// for every entry it passes over.
 	///
-	/// `ponytail:` the walk itself is still one hash lookup per entry, which is what asking "which
-	/// of these are selected" costs when the selection is a set of paths and the rows are names.
-	/// That much is honest work. What is NOT is the details popup calling this to print three
-	/// numbers: after a Select All in a folder of 237,173 it materialises the whole selection as
-	/// owned paths on every frame, measured at 102 ms — the one path §166 left over. Fix it by
-	/// asking a cheaper question (how many, how many folders, how many bytes) rather than by
-	/// indexing the selection.
+	/// `ponytail:` the walk is one hash lookup per entry, which is what asking "which of these are
+	/// selected" costs when the selection is a set of paths and the rows are names. That is honest
+	/// work, and it is all that is left here: the details popup used to call this to print three
+	/// numbers, materialising the whole selection as owned paths on every frame — 102 ms after a
+	/// Select All in a folder of 237,173 — and asks
+	/// [`selection_totals`](Self::selection_totals) for the three numbers instead since §168. What
+	/// remains are the callers that genuinely want the paths: a batch copy or download, which needs
+	/// them once, not per frame.
 	pub fn selected_rows(&self, show_hidden: bool) -> Vec<(String, &Entry)> {
 		let Some(directory) = self.path.as_deref() else {
 			return Vec::new();
@@ -525,6 +541,53 @@ impl Files {
 					.then(|| (path.clone(), entry))
 			})
 			.collect()
+	}
+
+	/// What the details card wants to know about a multiple selection: how many, how many of them
+	/// are folders, and what the files come to (§168).
+	///
+	/// Three numbers, and asking for exactly those three is the point. The card was getting them
+	/// from [`selected_rows`](Self::selected_rows), which materialises every selected path as an
+	/// owned `String` — after a Select All in a folder of 237,173 that measured **102 ms on every
+	/// frame** to print three numbers, the one path §166 left over. Nothing here allocates: the path
+	/// is built into one reused buffer to ask the selection about it, and then reused again.
+	///
+	/// Takes the rows rather than the `.*` toggle, the same way
+	/// [`selected_index_in`](Self::selected_index_in) does, because the caller has already derived
+	/// them once for the grid. One derivation shared beats two that can disagree.
+	///
+	/// `ponytail:` measured, and the number is worth knowing before trusting this: over the same
+	/// Select All of 237,173, indexing the selection took **54 ms** and counting it takes **27**.
+	/// Half, not all — because the cost was never mostly the allocation. Building a path per row and
+	/// asking the set about it is paid by both routes, and that is what is left. 27 ms is still more
+	/// than a frame.
+	///
+	/// Answering all three in O(1) means the model keeping them as the selection changes, through
+	/// `select`, `deselect`, `select_all`, `extend_selection` and every re-listing that can
+	/// invalidate them — real state with real invalidation, for a case the user has called fast
+	/// enough. Worth building when a Select All in a crowded folder is something anyone does twice.
+	pub fn selection_totals(&self, rows: &[&Entry]) -> SelectionTotals {
+		let mut totals = SelectionTotals::default();
+		let Some(directory) = self.path.as_deref() else {
+			return totals;
+		};
+		let mut path = String::new();
+		for entry in rows {
+			path.clear();
+			crate::explorer::join_into(&mut path, directory, &entry.name);
+			if !self.selected.contains(path.as_str()) {
+				continue;
+			}
+			totals.items += 1;
+			if entry.kind == FilesKind::Dir {
+				totals.folders += 1;
+			} else {
+				// A folder's own size is the size of its directory entry, not of what is inside
+				// it, so adding it would make the total wrong rather than complete.
+				totals.bytes += entry.meta.size.unwrap_or(0);
+			}
+		}
+		totals
 	}
 
 	/// Where the cursor sits among the rows on show (§20) — the one number both the details
@@ -1945,6 +2008,68 @@ mod tests {
 		assert_eq!(chosen, ["/a", "/b"]);
 		// And the same rule read backwards, which is what places the details popup.
 		assert_eq!(files.selected_index(true), Some(1));
+	}
+
+	/// What the details card wants to know about a multiple selection, asked as three numbers
+	/// rather than as the selection itself (§168).
+	///
+	/// The popup only ever prints how many, how many folders and how many bytes, and it was getting
+	/// them from `selected_rows` — which materialises every selected path as an owned String. After
+	/// a Select All in a folder of 237,173 that measured 102 ms, on every frame, to print three
+	/// numbers. This is the cheaper question §166 said to ask.
+	///
+	/// A folder's own size is the size of its directory entry, not of what is inside it, so `bytes`
+	/// leaves folders out rather than reporting a total that means nothing.
+	#[test]
+	fn a_selection_is_counted_without_building_any_of_its_paths() {
+		// The folder carries a SIZE, and that is the point of it: with `Meta::default()` its size is
+		// `None`, so it contributes nothing either way and the exclusion below cannot be observed.
+		// A test that cannot fail on the rule it names is the defect §165 and §168 both found.
+		let mut docs = entry("docs", FilesKind::Dir);
+		docs.meta.size = Some(4096);
+		let (mut files, _) = pane(&[
+			docs,
+			sized("a.txt", 100, 0),
+			sized("b.txt", 200, 0),
+			sized("c.txt", 300, 0),
+		]);
+		files.select_all(true);
+
+		let rows = files.rows(true);
+		let totals = files.selection_totals(&rows);
+
+		assert_eq!(totals.items, 4, "every row on show is selected");
+		assert_eq!(totals.folders, 1, "counted apart from the files");
+		assert_eq!(totals.bytes, 600, "the files' sizes, and not the folder's");
+	}
+
+	/// The same question with nothing selected, which is the state the pane spends most of its
+	/// life in — and the one where the old route still walked every row to find nothing.
+	#[test]
+	fn nothing_selected_counts_to_nothing() {
+		let (files, _) = pane(&[entry("docs", FilesKind::Dir), sized("a.txt", 100, 0)]);
+
+		let rows = files.rows(true);
+		let totals = files.selection_totals(&rows);
+
+		assert_eq!(totals.items, 0);
+		assert_eq!(totals.folders, 0);
+		assert_eq!(totals.bytes, 0);
+	}
+
+	/// A row hidden by the `.*` toggle is not in the selection's totals, because it is not in the
+	/// rows the caller hands over — which is the whole reason this takes the rows rather than the
+	/// toggle. One derivation, in the caller, shared by the popup and the grid (§166, §168).
+	#[test]
+	fn a_hidden_row_is_left_out_of_the_totals_with_the_rows_it_came_from() {
+		let (mut files, _) = pane(&[sized(".secret", 1000, 0), sized("plain", 25, 0)]);
+		files.select_all(true);
+
+		let shown = files.rows(false);
+		let totals = files.selection_totals(&shown);
+
+		assert_eq!(totals.items, 1, "only the row on show");
+		assert_eq!(totals.bytes, 25, "and only its bytes");
 	}
 
 	#[test]

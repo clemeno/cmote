@@ -215,7 +215,7 @@ pub fn pane(
 	if let Some(band) = files.band() {
 		layers.push(band_layer(band.rect(), files, width));
 	}
-	if let Some(popup) = details(files, &entries, show_hidden, width) {
+	if let Some(popup) = details(files, &entries, width) {
 		layers.push(popup);
 	}
 
@@ -666,25 +666,15 @@ fn spacer<'a>(height: f32) -> Element<'a, Message> {
 /// column count and the scroll offset — and flipped to the cell's left when the card would
 /// hang off the right edge.
 ///
-/// `ponytail:` `entries` and `show_hidden` are the same fact twice — `entries` IS
-/// `files.rows(show_hidden)`, derived by the caller — so the two can in principle disagree, and
-/// `summary` then derives a third view of them with `selected_rows`. §168's review named the clump
-/// and it is left standing, because the honest fix is the one §166 parked: give `Files` a method
-/// answering how many, how many folders and how many bytes, and `show_hidden` stops travelling
-/// while the 102 ms a Select All costs here goes with it. Two findings, one job — see
-/// `Files::selected_rows`. Bundling the pair into a type instead would tidy the signature and fix
-/// neither.
-fn details<'a>(
-	files: &'a Files,
-	entries: &[&Entry],
-	show_hidden: bool,
-	width: f32,
-) -> Option<Element<'a, Message>> {
+/// It takes the rows and nothing else. It used to take `show_hidden` as well — the fact `entries`
+/// is derived FROM — so the two could disagree, and `summary` then derived a third view of them
+/// (§168). One derivation, made once by the caller for the grid, read here.
+fn details<'a>(files: &'a Files, entries: &[&Entry], width: f32) -> Option<Element<'a, Message>> {
 	let index = files.selected_index_in(entries)?;
 	let entry = *entries.get(index)?;
 
 	let lines = if files.selected_count() > 1 {
-		summary(files, show_hidden)
+		summary(files, entries)
 	} else {
 		entry_lines(files, entry)
 	};
@@ -798,25 +788,18 @@ fn entry_lines(files: &Files, entry: &Entry) -> Vec<String> {
 /// and files, and what the files come to. A folder's own size is the size of its directory
 /// entry, not of what is inside it, so it is left out of the total rather than making it
 /// wrong.
-fn summary(files: &Files, show_hidden: bool) -> Vec<String> {
-	let rows = files.selected_rows(show_hidden);
-	let folders = rows
-		.iter()
-		.filter(|(_, entry)| entry.kind == FilesKind::Dir)
-		.count();
-	let total: u64 = rows
-		.iter()
-		.filter(|(_, entry)| entry.kind != FilesKind::Dir)
-		.filter_map(|(_, entry)| entry.meta.size)
-		.sum();
-
+/// It asks `Files` for three numbers rather than for the selection (§168). Printing them from
+/// `selected_rows` meant materialising every selected path as an owned String on every frame —
+/// 102 ms of it after a Select All in a folder of 237,173, to print three numbers.
+fn summary(files: &Files, rows: &[&Entry]) -> Vec<String> {
+	let totals = files.selection_totals(rows);
 	vec![
-		format!("{} items selected", rows.len()),
-		match folders {
-			0 => format!("{} files", rows.len()),
-			_ => format!("{folders} folders, {} files", rows.len() - folders),
+		format!("{} items selected", totals.items),
+		match totals.folders {
+			0 => format!("{} files", totals.items),
+			folders => format!("{folders} folders, {} files", totals.items - folders),
 		},
-		human_size(total),
+		human_size(totals.bytes),
 	]
 }
 
@@ -1358,7 +1341,7 @@ mod tests {
 		]);
 
 		assert_eq!(
-			summary(&files, true),
+			summary(&files, &files.rows(true)),
 			vec![
 				"5 items selected".to_owned(),
 				"2 folders, 3 files".to_owned(),
@@ -1374,7 +1357,7 @@ mod tests {
 			sized("b.txt", FilesKind::File, Some(2)),
 		]);
 		assert_eq!(
-			summary(&files, true),
+			summary(&files, &files.rows(true)),
 			vec![
 				"2 items selected".to_owned(),
 				"2 files".to_owned(),
