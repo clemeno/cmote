@@ -19625,3 +19625,125 @@ answer, and it needs no configuration and no per-server probe.
 and nothing in a 1,810-test suite can observe a round-trip count. A folder walk could silently
 regress from 34 trips to 1,057 and stay green. That is not "untestable code" — it is a missing seam,
 recorded here and handed to §168.
+
+## §168 — The count was never the number; the number was how many were in flight
+
+§167 ended by naming what it could not check. Two of its changes are **round-trip-count** changes,
+and the walk was written against `RawSftpSession` — a session that will answer anything needs a live
+server, so the count was invisible to the suite. A regression from waves back to one-at-a-time, from
+8.7 seconds to 334, would have left all 1,810 tests green.
+
+This is the seam that asked for, and one thing about it is worth stating before the design, because
+it is what makes the seam non-obvious:
+
+**The request count is not the property.** A walk that sends 1,057 `readdir`s in waves of 32 and a
+walk that awaits them one at a time make **exactly the same number of requests**. Counting them
+cannot tell the two apart. What differs is how many were **outstanding at once**, and that is what a
+test has to be able to read.
+
+### The seam
+
+`trait Walk` names the four requests a directory walk makes — `opendir`, `readdir`, `stat`, `close` —
+and `stream_names`, `read_names`, `keep_dirs` and `dirs_inside` are written against it rather than
+against the session. It is the same seam `Exec` draws for the shell backend (§113), drawn one
+protocol down, and on the same rule: **a request that is a value in and a value out belongs on the
+trait; an operation handing back a live `russh` stream does not.** The transfer loops' `open`, `read`
+and `write` therefore stay on the concrete session, exactly as `Exec` leaves `stream` off.
+
+It is an **internal** seam. `Browse::Sftp` still carries a concrete `Arc<RawSftpSession>`, nothing
+outside the module knows the trait exists, and the delete walk keeps calling the session directly for
+`lstat`, `remove` and `rmdir`. What crosses the seam is one module's own tests.
+
+**The trait speaks russh-sftp's own types, on purpose.** A vocabulary of its own would have to
+translate `StatusCode::Eof` into it — and then the rule that EOF *ends* a listing while any other
+error *fails* it would live in the adapter, which is the one part of this a fake cannot exercise.
+Speaking the protocol keeps that rule in the walk, where the tests are. It costs nothing, because
+every reply shape is constructible from outside the crate: `File::new`, `FileAttributes::set_dir`,
+`Error::Status(Status { .. })`.
+
+### How a wave becomes a number
+
+`Steps`, the fake, records every request and — the part that matters — **how many were in flight at
+once**. Each `readdir` answers only after a `yield_now`, so every request in a wave reaches that
+point before any of them is answered, and the high-water mark is the width of the wave: 32 for the
+real walk, 1 for a serial one. `#[tokio::test]` runs on the current thread, which is what makes the
+number exact rather than a race — on a multi-thread runtime a reply could land before the last
+request had left.
+
+Nine tests, over rules that between them had none:
+
+```
+a wave is in flight at once and not a queue of one   (peak == READDIR_WINDOW)
+a real error fails the listing rather than shortening it
+the rest of a wave survives one reply saying EOF
+a wave that lands no names at all stops the walk
+only the symlinks are resolved, and a broken one is left out
+a folder small enough to walk never asks the shell
+a folder too big to walk is asked of the shell instead
+a server without find falls back to finishing the walk
+an abandoned walk still gives the handle back
+```
+
+The last one is worth pointing at. §167 chose `drop(landing)` over `producer.abort()` and wrote down
+why — an abort would kill `stream_names` mid-`close` and leak a server-side directory handle. That
+was a claim in a comment. It is an assertion now: replacing the drop with an abort fails that test
+with **0 closes against 1**.
+
+`shellfs::Script` became `pub(super)`, with `commands()` beside `only_command()`. The adaptive
+listing asks both backends one question each — the walk through `Walk`, `find` through `Exec` — so
+its tests need both fakes, and a second copy of `Script` here would have been the same fake twice.
+
+### The prove-it that did not fail
+
+Nine probes, each reverted. Eight behaved. The ninth is the one worth recording:
+
+**`WALK_WAVES_BEFORE_FIND` raised from 2 to 1000 broke nothing.** The two big-folder fixtures were
+sized `READDIR_WINDOW * WALK_WAVES_BEFORE_FIND + 1` — *scaled to the constant they were meant to
+pin*, so however absurd the budget became the fixture grew to overflow it and the tests stayed green.
+An earlier attempt at the same probe, `usize::MAX`, had failed all three of them with "attempt to
+multiply with overflow": a failure in the test's own arithmetic, which is a probe proving nothing.
+
+They are a fixed three waves now — more than a budget of two, less than a budget of three — and the
+same probe then fails both, on the assertions that matter (`[]` where `["x", "y"]` was expected, and
+one `opendir` where two were). The budget is a decision (§167), so raising it past three *should*
+make a test speak up.
+
+The other eight, each reverted: the wave narrowed to one request (peak 1 against 32); the error arm
+ending the listing instead of failing it (a one-name listing where the folder was refused); EOF
+clearing the wave it arrived in (**five** tests, because every listing's last wave mixes EOF with
+real names); the empty-wave guard removed (64 `readdir`s against 32 — and unbounded against a server
+that never sends EOF, which is the loop this replaced); every entry stat'ed rather than only the
+symlinks (a round trip per plain file); no budget at all, so the shell is asked first; a refused
+`find` answered as an empty folder rather than by walking; and the abort above.
+
+### What was not built
+
+**`remove_subtree` is the next candidate and is deliberately left.** It drives a walk of its own —
+breadth-first, every descendant discovered before anything is unlinked, directories removed deepest
+first — and `remove` and `rmdir` would be two more methods on the trait to reach it. It is real logic
+with a real ordering rule and no test. It is also not what §167 flagged, and a seam widened to cover
+everything nearby is how a test-only trait turns into a second filesystem API.
+
+### What to keep
+
+**A property that is invisible to the suite is a design finding, not a testing gap.** The instinct on
+reading "this needs a live server" is to accept it and move on, or to reach for an integration test
+against a real sshd. The actual answer was that the walk was written against the wrong thing: a
+foreign, non-constructible type standing in for four requests. Naming the four made the property
+reachable without a server anywhere.
+
+**Ask what the regression would look like before writing the assertion.** The obvious test for "did
+we fix the round trips" counts round trips, and it would have passed on the 334-second version. The
+whole seam would have been built, at the cost it costs, and pinned nothing. One minute spent on "what
+number differs?" is what turned this from a count into a high-water mark.
+
+**A fixture sized off the constant it pins can never fail on it.** `READDIR_WINDOW *
+WALK_WAVES_BEFORE_FIND + 1` reads like care — it says "one more than the budget, whatever the budget
+is" — and it is precisely the shape that follows the decision instead of holding it. §165 found a
+test that could not fail because it never sent the sequence; this is the same defect arriving through
+arithmetic. **The tell is a test whose fixture mentions the constant under test.**
+
+**And a probe that fails for its own reasons proves nothing.** `usize::MAX` produced three red tests
+and an arithmetic overflow in the test file, not one observation about the walk. A prove-it has to
+fail *at the assertion*, with the number the code got wrong in the message — otherwise it is only
+noise that happens to be red.
