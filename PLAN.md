@@ -19723,6 +19723,57 @@ that never sends EOF, which is the loop this replaced); every entry stat'ed rath
 symlinks (a round trip per plain file); no budget at all, so the shell is asked first; a refused
 `find` answered as an empty folder rather than by walking; and the abort above.
 
+### What the review found, and what was done with it
+
+Run on the whole arc — §166, §167 and §168 — against `397302a~1`, on two axes as separate readers.
+**Each axis found what the other's brief could not see**, again: Standards found a name meaning three
+things and a walk spawned in three copies; Spec found four sentences that described intentions rather
+than code, and a test that could only fail on half of what it was cited for.
+
+Acted on:
+
+* **A listing that failed halfway never settled into order.** `chunk` sorts at `done`; `failed` is
+  the other ending and did not. So a refused folder kept the server's hash order for as long as the
+  user stayed in it — §167's "settle into display order" being true of one ending out of two. One
+  `sort`, and a test.
+* **The marker click still selected.** §167 says *"`toggle_node` used to select the row on the way
+  past"*. It still did; only `RowClicked` had been given its own `select`. The sentence described the
+  intention. Opening a branch to see what is under it is not choosing it, so the selection now stays
+  where the name click put it.
+* **The abandoned-walk test pinned half of what it was cited for** — the section above.
+* **`band` named a stripe**, the word's third meaning in one file, two lines from a local called
+  `stripes`. AGENTS.md's "one name means one thing crate-wide".
+* **The extent claim was 4 px out**, in two places. Corrected rather than fixed: the uniform pitch is
+  what `row_top` and `band_hits` are arithmetic on.
+* **Three comments still described the code as it was before §167**, including
+  `WALK_WAVES_BEFORE_FIND`'s own doc saying "if a second wave arrives" for a budget that takes three.
+  PLAN.md and the test comment were both right, so the wrong spelling was the one a reader changing
+  the number would meet first.
+* **The walk was spawned three times in three copies**, one per §167 commit, never read next to each
+  other. `spawn_walk` and `finish` — +42/-34, so not fewer lines, just one place to get the
+  capacity-1 bound and the `JoinError` case right.
+* **`explorer::join`'s slash rule was written twice**, the second time in a comment admitting it.
+  `join_into` is the rule now.
+* **`CONTEXT.md` gained nothing** while three files gained four nouns. *Walk*, *Wave*, *Stripe* and
+  *Overscan*, each with the `_Avoid_` line that records what it must not be confused with.
+
+Declined, with the reason rather than silently:
+
+* **`READDIR_WINDOW` beside `WALK_WAVES_BEFORE_FIND` — two words for one concept.** They are two
+  concepts: the *window* is how wide a wave is, the *wave* is the group sent at that width. Renaming
+  the constant to `READDIR_WAVE` would make "waves of `READDIR_WAVE`" say nothing. The glossary
+  entries are the fix, and they are written.
+* **`Browse::Sftp` gaining a field rippled to seven match arms, six of them `{ sftp, .. }`.** An
+  accessor would collapse the ripple and cost the thing the ripple buys: the match is what makes the
+  compiler name every site the day a fourth `Browse` variant exists. Six one-line arms that discard a
+  field is what exhaustiveness looks like in Rust, not shotgun surgery.
+* **`details(files, entries, show_hidden, width)` is a clump**, and `entries` is derived from
+  `show_hidden`, so the two can disagree. True — and the honest fix is the one §166 parked: a `Files`
+  method answering how many, how many folders, how many bytes, which stops `show_hidden` travelling
+  *and* removes the 102 ms a Select All costs there. Two findings, one job. Bundling the pair into a
+  type would tidy the signature and fix neither, so the clump keeps a `ponytail:` note pointing at
+  the leftover it shares.
+
 ### What was not built
 
 **`remove_subtree` is the next candidate and is deliberately left.** It drives a walk of its own —

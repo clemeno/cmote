@@ -665,6 +665,15 @@ fn spacer<'a>(height: f32) -> Element<'a, Message> {
 /// position is computed from the same geometry the grid is laid out with — the index, the
 /// column count and the scroll offset — and flipped to the cell's left when the card would
 /// hang off the right edge.
+///
+/// `ponytail:` `entries` and `show_hidden` are the same fact twice — `entries` IS
+/// `files.rows(show_hidden)`, derived by the caller — so the two can in principle disagree, and
+/// `summary` then derives a third view of them with `selected_rows`. §168's review named the clump
+/// and it is left standing, because the honest fix is the one §166 parked: give `Files` a method
+/// answering how many, how many folders and how many bytes, and `show_hidden` stops travelling
+/// while the 102 ms a Select All costs here goes with it. Two findings, one job — see
+/// `Files::selected_rows`. Bundling the pair into a type instead would tidy the signature and fix
+/// neither.
 fn details<'a>(
 	files: &'a Files,
 	entries: &[&Entry],
