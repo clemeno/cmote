@@ -438,11 +438,15 @@ impl Explorer {
 		}
 	}
 
-	/// A row click: select the folder and flip it open or shut. Returns a path to list when
+	/// The disclosure marker's click: flip the folder open or shut. Returns a path to list when
 	/// opening it needs one — and opening always re-lists (`expand`'s open transition), so a
 	/// folder reopened after a shell-side change shows its current contents, not the cache.
+	///
+	/// It does NOT select the folder, and since §167 that is the point: the two clicks a row offers
+	/// ask two different questions, and the selection is the NAME's answer to being clicked
+	/// (`RowClicked` makes it explicitly). Opening a branch to see what is under it should not move
+	/// what the details popup and the arrow keys are pointing at (§168).
 	pub fn toggle_node(&mut self, path: &str) -> Option<String> {
-		self.select(path);
 		self.menu = None;
 		if self.nodes.get(path).is_some_and(|node| node.open) {
 			self.collapse(path);

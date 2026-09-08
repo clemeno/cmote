@@ -1000,6 +1000,14 @@ mod tests {
 				.any(|command| matches!(command, SshCommand::ListFiles { .. })),
 			"and the pane's rows were not: {commands:?}"
 		);
+		// Nor did it move the selection off the row the user had picked. `toggle_node` used to
+		// select on the way past, which §167 said it had stopped doing while it still did (§168):
+		// opening a branch to see what is under it is not choosing it.
+		assert_eq!(
+			app.panes.tree.selected(),
+			Some("/var"),
+			"the marker left the selection where the name click put it"
+		);
 	}
 
 	/// A first connection asks the server where the login shell stands, and opens both panes there
