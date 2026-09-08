@@ -126,6 +126,32 @@ _Avoid_: files strip
 One half of the browser strip — the folder tree, or the files pane (§18, §19).
 _Avoid_: panel, which is a different thing here — see **Panel**
 
+**Walk**:
+Reading a remote directory by asking the server for its names, a `readdir` reply at a time —
+and the trait naming the four requests that takes: `opendir`, `readdir`, `stat`, `close`
+(§167, §168). The tree's walk keeps only the folders, the pane's keeps everything, and both
+pay the same trips because SFTP has no directories-only filter.
+_Avoid_: crawl, traversal
+
+**Wave**:
+The `readdir` requests a walk puts on the wire at once — `READDIR_WINDOW` of them, sent
+together, all landed before the next go out (§167). Latency is what makes a wave worth having:
+the round trips are the cost, so overlapping them took one folder from 334 s to 8.7.
+_Avoid_: batch — a batch is what a wave is CUT INTO on the way to the pane (`files::BATCH`),
+so the two words are one listing's two units and must not be swapped
+
+**Stripe**:
+One row of cells in the files pane's grid: the entries at one row index, laid out explicitly
+since §166 so that only the rows the viewport covers are built.
+_Avoid_: band, which here is the rubber band and elsewhere the terminal's columns — see
+**Band**. §168's review found `band` naming a stripe, which is the word's third meaning
+
+**Overscan**:
+The rows built beyond the viewport either side, so a scroll of one notch does not show a gap
+before the next frame (`OVERSCAN` in the files grid, `GUTTER_OVERSCAN` in the editor's gutter —
+§32, §166).
+_Avoid_: slack, margin
+
 **Panel**:
 A floating surface drawn over everything else: a context menu's card of items, or a dialog's.
 Never one of the browser panes, and never the terminal grid. `PANEL_BG` is its dark fill.
