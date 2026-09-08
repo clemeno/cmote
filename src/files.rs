@@ -1135,9 +1135,9 @@ impl Files {
 			.iter()
 			.filter(|entry| show_hidden || !entry.name.starts_with('.'))
 			.collect();
-		// Only a user-chosen sort re-orders here. With none, the entries are already in the
-		// default dirs-first-by-name order the server task laid down (the free `sort` below),
-		// so the common case pays nothing beyond the filter above.
+		// Only a user-chosen sort re-orders here. With none, the entries are already in the default
+		// dirs-first-by-name order — `sort` below, run once by `chunk` or `failed` when the listing
+		// ended — so the common case pays nothing beyond the filter above.
 		if let Some(key) = self.sort {
 			// An unset direction sorts ascending, so a key on its own already reorders the grid.
 			let dir = self.sort_dir.unwrap_or(SortDir::Ascending);
@@ -1148,8 +1148,14 @@ impl Files {
 }
 
 /// Put a listing in display order: directories first, then everything else, each group
-/// case-insensitively by name. Done once by the server task, before the entries are cut
-/// into batches, so the grid can simply append each batch as it lands.
+/// case-insensitively by name.
+///
+/// Done once per listing by the MODEL, at whichever of the two endings arrives — the batch that
+/// says `done` (`chunk`) or a failure (`failed`). It used to run in the server task before the
+/// entries were cut into batches, which stopped being possible in §167: a remote listing is streamed
+/// wave by wave as it lands, so there is no moment before the batches at which the whole thing
+/// exists. The local backend still hands over a listing it sorted itself, and pays almost nothing
+/// for this second pass — `sort_by` on already-ordered input walks the runs it finds.
 pub fn sort(entries: &mut [Entry]) {
 	entries.sort_by(|left, right| {
 		let folder_first = (left.kind != FilesKind::Dir).cmp(&(right.kind != FilesKind::Dir));

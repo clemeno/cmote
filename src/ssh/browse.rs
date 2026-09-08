@@ -146,9 +146,11 @@ async fn list_sftp(
 ///
 /// A folder that has not finished after this many waves is a folder where the walk is the wrong
 /// tool: `.../processed` took 11.6 s of it, against roughly a second for `find`. So the walk starts,
-/// and if a second wave arrives — the folder holds more than one wave's worth of names — it is
-/// abandoned and the question asked the other way. The waves already read are not wasted work
-/// avoided: they are the round trip the walk would have cost anyway.
+/// and once a wave arrives AFTER the last allowed one — the folder holds more than this many waves'
+/// worth of names — it is abandoned and the question asked the other way. That arrival is the whole
+/// signal, so a folder whose names run out exactly on the last allowed wave still counts as
+/// answered by the walk. The waves already read are not wasted work avoided: they are the round trip
+/// the walk would have cost anyway.
 const WALK_WAVES_BEFORE_FIND: usize = 2;
 
 /// The folder names inside `path`, by whichever route suits the folder's size (§167).
