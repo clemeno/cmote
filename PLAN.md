@@ -19788,6 +19788,35 @@ Declined at first and then done, because the two findings turned out to be one j
   numbers across `select`, `deselect`, `select_all`, `extend_selection` and every re-listing that
   invalidates them.
 
+### The `reveal` item, closed — and it was the wrong claim
+
+§167 left one thing open in its own commit message, and repeated it three times: that
+`Explorer::reveal` opens the directory the shell is in as well as its parents, so *"a `cd` into a
+crowded folder is the same double walk by a different route"*. **A `cd` does not call `reveal`.**
+
+Reading the call sites rather than the function: the unguarded `reveal` is reached from exactly one
+place, `on_reveal`, behind `Message::RevealPressed` — the **Reveal button**, which dims whenever the
+shell has never announced a cwd (§17: it needs OSC 7). The guarded `reveal_if_new` is reached at
+**connect and resume**. A prompt announcement moves the panes through `follow` and the guards, and
+never through this.
+
+So the double listing that survives §167 is at **connect/resume**, not on `cd`:
+`reveal_if_new(files_start)` opens the chain down to the remembered files directory *and that
+directory itself*, while `pane.show(files_start)` lists it for rows. Two listings of one folder,
+reachable whether or not the shell emits anything.
+
+And it is now cheap, by §167's own doing: the tree's half of that pair goes through `dirs_inside`, so
+on a folder big enough to matter it takes the `find` route — about a second, where before it was the
+same 11.6 s walk the pane was doing beside it. The duplicate that was worth deleting was the one a
+single click caused, on every navigation; this one happens once per connection and one half of it is
+no longer a walk.
+
+**The lesson is about the claim, not the code.** The function does what §167 said it does; what
+§167 got wrong is *who calls it*, and it got that wrong by reading the function three times and the
+call sites never. It is the mirror of §168's own finding about tests: a claim needs the thing that
+would falsify it looked at, and for "this is on the `cd` path" that thing is a `grep` for the
+callers.
+
 ### What was not built
 
 **`remove_subtree` is the next candidate and is deliberately left.** It drives a walk of its own —
