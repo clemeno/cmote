@@ -243,6 +243,16 @@ trait Walk {
 	/// Follow a path — a symlink included — and say what is at the end of it.
 	fn stat(&self, path: String) -> impl Future<Output = Result<Attrs, SftpError>> + Send;
 
+	/// The same question WITHOUT following: a symlink answers as itself. The one a delete has to
+	/// ask, since following a link would take it to whatever the link points at (§18).
+	fn lstat(&self, path: String) -> impl Future<Output = Result<Attrs, SftpError>> + Send;
+
+	/// Unlink one name — a file, or a symlink whatever it points at. Never a directory.
+	fn remove(&self, path: String) -> impl Future<Output = Result<Status, SftpError>> + Send;
+
+	/// Remove one directory, which a server refuses while any name is still inside it.
+	fn rmdir(&self, path: String) -> impl Future<Output = Result<Status, SftpError>> + Send;
+
 	/// Give a handle back. A server has a finite number of them.
 	fn close(&self, handle: String) -> impl Future<Output = Result<Status, SftpError>> + Send;
 }
@@ -260,6 +270,18 @@ impl Walk for RawSftpSession {
 
 	async fn stat(&self, path: String) -> Result<Attrs, SftpError> {
 		RawSftpSession::stat(self, path).await
+	}
+
+	async fn lstat(&self, path: String) -> Result<Attrs, SftpError> {
+		RawSftpSession::lstat(self, path).await
+	}
+
+	async fn remove(&self, path: String) -> Result<Status, SftpError> {
+		RawSftpSession::remove(self, path).await
+	}
+
+	async fn rmdir(&self, path: String) -> Result<Status, SftpError> {
+		RawSftpSession::rmdir(self, path).await
 	}
 
 	async fn close(&self, handle: String) -> Result<Status, SftpError> {
@@ -673,7 +695,7 @@ async fn remove_sftp(
 /// Remove one entry whatever it is (§18). A symlink is seen by `lstat` as itself and unlinked
 /// with `remove`, NEVER followed — following it would delete whatever it points at. A plain file
 /// is unlinked the same way; a real directory is emptied and then removed by `remove_subtree`.
-async fn remove_tree(sftp: &Arc<RawSftpSession>, root: &str) -> Result<()> {
+async fn remove_tree<W: Walk + Send + Sync + 'static>(sftp: &Arc<W>, root: &str) -> Result<()> {
 	let attrs = sftp
 		.lstat(root.to_owned())
 		.await
@@ -693,7 +715,7 @@ async fn remove_tree(sftp: &Arc<RawSftpSession>, root: &str) -> Result<()> {
 /// and `files`, then the files are unlinked and the directories removed DEEPEST FIRST — a
 /// directory only goes once nothing inside it is left. A symlink to a folder is a file here (its
 /// own `lstat` type is a link), so it is unlinked, not descended into.
-async fn remove_subtree(sftp: &Arc<RawSftpSession>, root: &str) -> Result<()> {
+async fn remove_subtree<W: Walk + Send + Sync + 'static>(sftp: &Arc<W>, root: &str) -> Result<()> {
 	let mut dirs = vec![root.to_owned()];
 	let mut files: Vec<String> = Vec::new();
 	let mut frontier = vec![root.to_owned()];
@@ -908,6 +930,9 @@ struct Steps {
 	/// path is "no such file" — a dangling symlink.
 	dirs: Vec<String>,
 	plain: Vec<String>,
+	/// The paths that are symlinks. Only `lstat` sees these; `stat` follows them, so a path listed
+	/// here AND in `dirs` is a link to a folder — the case a delete must not walk into (§18).
+	links: Vec<String>,
 	/// Woken when the handle is given back, so a test can wait for a walk it does not own to wind
 	/// down without guessing at a delay. `Notify` keeps the wake-up if it arrives first, which is
 	/// what makes the wait raceless either way round.
@@ -977,6 +1002,25 @@ impl Steps {
 			.count()
 	}
 
+	/// What one path is, by the lists — a directory, a plain file, or nothing there at all. The
+	/// answer `stat` gives, and the answer `lstat` gives for everything that is not a link.
+	fn found(&self, path: &str) -> Result<Attrs, SftpError> {
+		let mut attrs = FileAttributes::default();
+		if self.dirs.iter().any(|dir| dir == path) {
+			attrs.set_dir(true);
+		} else if self.plain.iter().any(|file| file == path) {
+			attrs.set_regular(true);
+		} else {
+			return Err(SftpError::Status(Status {
+				id: 0,
+				status_code: StatusCode::NoSuchFile,
+				error_message: "no such file".to_owned(),
+				language_tag: String::new(),
+			}));
+		}
+		Ok(Attrs { id: 0, attrs })
+	}
+
 	/// The arguments of every request of one kind, in the order they were made.
 	fn arguments(&self, kind: &str) -> Vec<String> {
 		self.made
@@ -1029,33 +1073,52 @@ impl Walk for Steps {
 		self.enter(format!("stat {path}"));
 		tokio::task::yield_now().await;
 		self.leave();
-		let mut attrs = FileAttributes::default();
-		if self.dirs.contains(&path) {
-			attrs.set_dir(true);
-			Ok(Attrs { id: 0, attrs })
-		} else if self.plain.contains(&path) {
-			attrs.set_regular(true);
+		self.found(&path)
+	}
+
+	/// The link-aware half of the pair: `links` is consulted FIRST, so a symlink answers as itself
+	/// and the walk never learns what is on the other side of it.
+	fn lstat(&self, path: String) -> impl Future<Output = Result<Attrs, SftpError>> + Send {
+		self.enter(format!("lstat {path}"));
+		self.leave();
+		let answer = if self.links.iter().any(|link| link == &path) {
+			let mut attrs = FileAttributes::default();
+			attrs.set_symlink(true);
 			Ok(Attrs { id: 0, attrs })
 		} else {
-			Err(SftpError::Status(Status {
-				id: 0,
-				status_code: StatusCode::NoSuchFile,
-				error_message: "no such file".to_owned(),
-				language_tag: String::new(),
-			}))
-		}
+			self.found(&path)
+		};
+		std::future::ready(answer)
+	}
+
+	fn remove(&self, path: String) -> impl Future<Output = Result<Status, SftpError>> + Send {
+		self.enter(format!("remove {path}"));
+		self.leave();
+		std::future::ready(Ok(ok()))
+	}
+
+	fn rmdir(&self, path: String) -> impl Future<Output = Result<Status, SftpError>> + Send {
+		self.enter(format!("rmdir {path}"));
+		self.leave();
+		std::future::ready(Ok(ok()))
 	}
 
 	fn close(&self, handle: String) -> impl Future<Output = Result<Status, SftpError>> + Send {
 		self.enter(format!("close {handle}"));
 		self.leave();
 		self.closed.notify_one();
-		std::future::ready(Ok(Status {
-			id: 0,
-			status_code: StatusCode::Ok,
-			error_message: String::new(),
-			language_tag: String::new(),
-		}))
+		std::future::ready(Ok(ok()))
+	}
+}
+
+/// The reply a server sends when a request simply worked.
+#[cfg(test)]
+fn ok() -> Status {
+	Status {
+		id: 0,
+		status_code: StatusCode::Ok,
+		error_message: String::new(),
+		language_tag: String::new(),
 	}
 }
 
@@ -1335,6 +1398,31 @@ mod walk_tests {
 			 {} readdirs",
 			steps.counted("readdir")
 		);
+	}
+
+	/// The one delete rule whose regression reaches OUTSIDE what the user selected. A folder they
+	/// picked is emptied and removed; a symlink they picked is one name, and unlinking it leaves
+	/// whatever it points at alone. Following it would delete a tree nobody chose — so the delete
+	/// asks `lstat` and not `stat`, and that difference is what this pins (§18).
+	#[tokio::test]
+	async fn a_link_to_a_folder_is_unlinked_and_never_descended_into() {
+		let steps = Arc::new(Steps {
+			// What the link is, and — the trap — what following it WOULD find: a real folder,
+			// holding a file that has to still be there afterwards.
+			links: vec!["/p/link".to_owned()],
+			dirs: vec!["/p/link".to_owned()],
+			..Steps::answering(vec![Ok(vec![plain_file("precious")])])
+		});
+
+		remove_tree(&steps, "/p/link").await.expect("the link went");
+
+		assert_eq!(
+			steps.arguments("remove"),
+			vec!["/p/link".to_owned()],
+			"the link itself was unlinked, and nothing on the far side of it"
+		);
+		assert_eq!(steps.counted("rmdir"), 0, "a link is not a folder to empty");
+		assert_eq!(steps.counted("opendir"), 0, "and it was never read either");
 	}
 }
 
