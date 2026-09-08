@@ -898,6 +898,10 @@ struct Steps {
 	/// path is "no such file" — a dangling symlink.
 	dirs: Vec<String>,
 	plain: Vec<String>,
+	/// Woken when the handle is given back, so a test can wait for a walk it does not own to wind
+	/// down without guessing at a delay. `Notify` keeps the wake-up if it arrives first, which is
+	/// what makes the wait raceless either way round.
+	closed: tokio::sync::Notify,
 }
 
 #[cfg(test)]
@@ -1035,6 +1039,7 @@ impl Walk for Steps {
 	fn close(&self, handle: String) -> impl Future<Output = Result<Status, SftpError>> + Send {
 		self.enter(format!("close {handle}"));
 		self.leave();
+		self.closed.notify_one();
 		std::future::ready(Ok(Status {
 			id: 0,
 			status_code: StatusCode::Ok,
@@ -1287,25 +1292,38 @@ mod walk_tests {
 		);
 	}
 
-	/// Dropping the receiver is what stops an abandoned walk, rather than aborting its task — and
-	/// the difference is a directory handle. `stream_names` sees the send fail, breaks, and closes
-	/// the handle on its way out; an `abort()` would have skipped that and leaked one per switch.
+	/// Two rules on one line of §167, and this test was cited for both while only pinning one.
+	///
+	/// Dropping the receiver is what stops an abandoned walk, rather than aborting its task, and the
+	/// difference is a directory handle: `stream_names` sees the send fail, breaks, and closes the
+	/// handle on its way out where an `abort()` would have skipped it. That much an earlier version
+	/// of this test did catch. What it did NOT catch is the stopping — the folder held exactly the
+	/// replies the three read waves consumed, so the walk ran out of names and left through the
+	/// EOF path. Deleting the `break` changed nothing it asserted.
+	///
+	/// So the folder holds far more than the switch reads. Now the walk has names left when nobody
+	/// is listening, and whether it stops is a number: four waves against every wave in the folder.
 	#[tokio::test]
-	async fn an_abandoned_walk_still_gives_the_handle_back() {
-		let steps = Arc::new(Steps::holding(READDIR_WINDOW * 3));
+	async fn an_abandoned_walk_stops_walking_and_gives_the_handle_back() {
+		let plenty = READDIR_WINDOW * 20;
+		let steps = Arc::new(Steps::holding(plenty));
 
 		let _ = dirs_inside(&steps, &Script::saying(""), "/p").await;
 
-		// The producer is not joined in the overflow path — it winds down on its own — so let the
-		// runtime finish it before reading the record. Deterministic here because the walk has only
-		// a failed send and one `close` left to do.
-		for _ in 0..8 {
-			tokio::task::yield_now().await;
-		}
+		// Waiting on the walk's own last act rather than on a delay: the producer is not joined in
+		// the overflow path, it winds down alone, and `Notify` holds the wake-up if it got there
+		// first — so there is no window to race with and no interval to guess at.
+		steps.closed.notified().await;
 		assert_eq!(
 			steps.counted("close"),
 			1,
 			"the handle was given back by the walk that was left behind"
+		);
+		assert!(
+			steps.counted("readdir") <= READDIR_WINDOW * 5,
+			"it stopped when the receiver went, rather than reading the whole folder for nobody: \
+			 {} readdirs",
+			steps.counted("readdir")
 		);
 	}
 }
