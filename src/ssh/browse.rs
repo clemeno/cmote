@@ -933,6 +933,17 @@ struct Steps {
 	/// The paths that are symlinks. Only `lstat` sees these; `stat` follows them, so a path listed
 	/// here AND in `dirs` is a link to a folder — the case a delete must not walk into (§18).
 	links: Vec<String>,
+	/// What each directory holds, for a walk that visits more than one of them — which `replies`,
+	/// one script for whoever asks, cannot say. Keyed by path, so `opendir` hands back the path
+	/// itself as the handle and a `readdir` says which directory it is reading.
+	tree: std::collections::HashMap<String, Vec<File>>,
+	/// The directories of `tree` that have already answered. A directory gives its names once and
+	/// EOF after, the way a server's own cursor does.
+	read: std::sync::Mutex<std::collections::HashSet<String>>,
+	/// What is still on the remote, so `rmdir` can refuse a directory with names still inside it.
+	/// That refusal is the whole reason a removal ORDER is something a test can fail on: without
+	/// it, taking a parent before its children looks exactly like taking them in the right order.
+	present: std::sync::Mutex<std::collections::HashSet<String>>,
 	/// Woken when the handle is given back, so a test can wait for a walk it does not own to wind
 	/// down without guessing at a delay. `Notify` keeps the wake-up if it arrives first, which is
 	/// what makes the wait raceless either way round.
@@ -956,6 +967,27 @@ impl Steps {
 				.map(|which| Ok(vec![plain_file(&format!("f{which}"))]))
 				.collect(),
 		)
+	}
+
+	/// A remote holding a real tree: each directory by path, and the names inside it. `present` is
+	/// seeded from it, so what the walk removes stops being there.
+	fn tree(dirs: &[(&str, &[File])]) -> Self {
+		let tree: std::collections::HashMap<String, Vec<File>> = dirs
+			.iter()
+			.map(|(path, names)| ((*path).to_owned(), names.to_vec()))
+			.collect();
+		let present = tree
+			.iter()
+			.flat_map(|(path, names)| {
+				std::iter::once(path.clone())
+					.chain(names.iter().map(|name| join(path, &name.filename)))
+			})
+			.collect();
+		Self {
+			tree,
+			present: std::sync::Mutex::new(present),
+			..Self::default()
+		}
 	}
 
 	/// Note a request as begun, and raise the high-water mark if this one is the highest yet.
@@ -1021,6 +1053,56 @@ impl Steps {
 		Ok(Attrs { id: 0, attrs })
 	}
 
+	/// What one `readdir` answers. A directory named in `tree` gives its own names and then EOF;
+	/// with no tree at all the flat script answers, whoever asked, which is what a test about one
+	/// directory wants. `None` is EOF either way.
+	fn listing(&self, dir: &str) -> Option<Result<Vec<File>, SftpError>> {
+		if self.tree.is_empty() {
+			return self
+				.replies
+				.lock()
+				.expect("no test panics while holding this lock")
+				.pop_front();
+		}
+		let first = self
+			.read
+			.lock()
+			.expect("no test panics while holding this lock")
+			.insert(dir.to_owned());
+		if first {
+			Some(Ok(self.tree.get(dir).cloned().unwrap_or_default()))
+		} else {
+			None
+		}
+	}
+
+	/// Take one name away, whatever it was.
+	fn unlink(&self, path: &str) {
+		self.present
+			.lock()
+			.expect("no test panics while holding this lock")
+			.remove(path);
+	}
+
+	/// Take one directory away — or refuse it the way a server does while anything is still inside.
+	fn empty_then_gone(&self, path: &str) -> Result<Status, SftpError> {
+		let inside = format!("{path}/");
+		let mut present = self
+			.present
+			.lock()
+			.expect("no test panics while holding this lock");
+		if present.iter().any(|name| name.starts_with(&inside)) {
+			return Err(SftpError::Status(Status {
+				id: 0,
+				status_code: StatusCode::Failure,
+				error_message: format!("{path} is not empty"),
+				language_tag: String::new(),
+			}));
+		}
+		present.remove(path);
+		Ok(ok())
+	}
+
 	/// The arguments of every request of one kind, in the order they were made.
 	fn arguments(&self, kind: &str) -> Vec<String> {
 		self.made
@@ -1040,9 +1122,11 @@ impl Walk for Steps {
 	fn opendir(&self, path: String) -> impl Future<Output = Result<Handle, SftpError>> + Send {
 		self.enter(format!("opendir {path}"));
 		self.leave();
+		// The handle is the path. A real server's is opaque and this one's says which directory it
+		// belongs to, which is what lets a walk over a tree be answered directory by directory.
 		std::future::ready(Ok(Handle {
 			id: 0,
-			handle: "h".to_owned(),
+			handle: path,
 		}))
 	}
 
@@ -1054,11 +1138,7 @@ impl Walk for Steps {
 		// number exact rather than a race — on a multi-thread runtime a reply could land before
 		// the last request had left.
 		tokio::task::yield_now().await;
-		let reply = self
-			.replies
-			.lock()
-			.expect("no test panics while holding this lock")
-			.pop_front();
+		let reply = self.listing(&handle);
 		self.leave();
 		match reply {
 			Some(Ok(files)) => Ok(Name { id: 0, files }),
@@ -1094,13 +1174,14 @@ impl Walk for Steps {
 	fn remove(&self, path: String) -> impl Future<Output = Result<Status, SftpError>> + Send {
 		self.enter(format!("remove {path}"));
 		self.leave();
+		self.unlink(&path);
 		std::future::ready(Ok(ok()))
 	}
 
 	fn rmdir(&self, path: String) -> impl Future<Output = Result<Status, SftpError>> + Send {
 		self.enter(format!("rmdir {path}"));
 		self.leave();
-		std::future::ready(Ok(ok()))
+		std::future::ready(self.empty_then_gone(&path))
 	}
 
 	fn close(&self, handle: String) -> impl Future<Output = Result<Status, SftpError>> + Send {
@@ -1423,6 +1504,41 @@ mod walk_tests {
 		);
 		assert_eq!(steps.counted("rmdir"), 0, "a link is not a folder to empty");
 		assert_eq!(steps.counted("opendir"), 0, "and it was never read either");
+	}
+
+	/// A directory only goes once nothing is inside it, which is why the removal runs DEEPEST FIRST
+	/// — `dirs` is discovery order, parents before children, and it is walked in reverse.
+	///
+	/// What makes this a test rather than an observation: `Steps` refuses a `rmdir` with names still
+	/// under it, the way a server does. So a wrong order does not merely look odd here, it fails.
+	#[tokio::test]
+	async fn a_tree_goes_deepest_first_so_no_rmdir_finds_names_still_inside() {
+		let steps = Arc::new(Steps::tree(&[
+			("/p", &[dir_file("mid"), plain_file("top.txt")]),
+			("/p/mid", &[dir_file("deep")]),
+			("/p/mid/deep", &[plain_file("deep.txt")]),
+		]));
+
+		remove_subtree(&steps, "/p").await.expect("the tree went");
+
+		assert_eq!(
+			steps.arguments("rmdir"),
+			vec![
+				"/p/mid/deep".to_owned(),
+				"/p/mid".to_owned(),
+				"/p".to_owned()
+			],
+			"children before parents, all the way up"
+		);
+		// The order files go in is not a rule — nothing depends on it — so this asks only that every
+		// one of them went, at whatever depth it sat.
+		let mut unlinked = steps.arguments("remove");
+		unlinked.sort();
+		assert_eq!(
+			unlinked,
+			vec!["/p/mid/deep/deep.txt".to_owned(), "/p/top.txt".to_owned()],
+			"every file in the tree, and only the files"
+		);
 	}
 }
 
