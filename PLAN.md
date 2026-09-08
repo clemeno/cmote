@@ -19788,6 +19788,12 @@ Declined at first and then done, because the two findings turned out to be one j
   numbers across `select`, `deselect`, `select_all`, `extend_selection` and every re-listing that
   invalidates them.
 
+  **And then it was tried, and that is where it stops.** A Ctrl+A on a crowded folder over a real
+  connection reads as immediate. The 27 ms is paid once when the selection changes, not on a frame
+  anyone is waiting on, so the arithmetic that says "more than a frame" and the hand on the keyboard
+  disagree — and the hand wins. Worth knowing which measurements answer the question and which only
+  bound it: this one bounded the cost and never claimed the cost was felt.
+
 ### The `reveal` item, closed — and it was the wrong claim
 
 §167 left one thing open in its own commit message, and repeated it three times: that

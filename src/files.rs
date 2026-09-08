@@ -564,8 +564,13 @@ impl Files {
 	///
 	/// Answering all three in O(1) means the model keeping them as the selection changes, through
 	/// `select`, `deselect`, `select_all`, `extend_selection` and every re-listing that can
-	/// invalidate them — real state with real invalidation, for a case the user has called fast
-	/// enough. Worth building when a Select All in a crowded folder is something anyone does twice.
+	/// invalidate them — real state with real invalidation.
+	///
+	/// **Tried, and left alone.** A Ctrl+A on a crowded folder over a real connection reads as
+	/// immediate, so the 27 ms does not show: a redraw costs it once when the selection changes, not
+	/// on a frame anybody is waiting on. So this is not the shortcut awaiting an upgrade that the
+	/// paragraph above might suggest — it is where this stops, unless a *held* interaction over a
+	/// full selection (a rubber band dragged across a Select All) ever makes it visible.
 	pub fn selection_totals(&self, rows: &[&Entry]) -> SelectionTotals {
 		let mut totals = SelectionTotals::default();
 		let Some(directory) = self.path.as_deref() else {
