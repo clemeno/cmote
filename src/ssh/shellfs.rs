@@ -820,9 +820,12 @@ fn free_local(path: &Path) -> std::path::PathBuf {
 /// command that went out and the parse of what came back. They are worth testing together: the
 /// quoting is a security boundary and the parsing is a compatibility one, and the pair of them is
 /// the entire shell backend.
+/// `pub(super)` since §168: `browse`'s own tests drive the adaptive tree listing, which asks BOTH
+/// backends one question each — the walk through `Walk` and `find` through `Exec` — so it needs this
+/// fake as well as its own. A second copy of it over there would be the same fake twice.
 #[cfg(test)]
 #[derive(Default)]
-struct Script {
+pub(super) struct Script {
 	/// What the caller asked to run, in order.
 	///
 	/// A `Mutex` rather than a `RefCell` because `Exec`'s futures are `Send` and a `&RefCell` is
@@ -835,7 +838,7 @@ struct Script {
 #[cfg(test)]
 impl Script {
 	/// A remote that answers every command with `reply`.
-	fn saying(reply: &str) -> Self {
+	pub(super) fn saying(reply: &str) -> Self {
 		Self {
 			ran: std::sync::Mutex::new(Vec::new()),
 			reply: Some(reply.to_owned()),
@@ -843,8 +846,17 @@ impl Script {
 	}
 
 	/// A remote that refuses every command.
-	fn refusing() -> Self {
+	pub(super) fn refusing() -> Self {
 		Self::default()
+	}
+
+	/// Every command run, in order — for a caller asking whether the shell was reached at all.
+	/// `only_command` is the sharper question and stays the one to prefer when there should be one.
+	pub(super) fn commands(&self) -> Vec<String> {
+		self.ran
+			.lock()
+			.expect("no test panics while holding this lock")
+			.clone()
 	}
 
 	/// Note one command as having been run.
@@ -861,7 +873,7 @@ impl Script {
 
 	/// The one command that was run. Panics if there was not exactly one, which is itself part of
 	/// what these tests check: a listing is one round trip, not several.
-	fn only_command(&self) -> String {
+	pub(super) fn only_command(&self) -> String {
 		let ran = self
 			.ran
 			.lock()

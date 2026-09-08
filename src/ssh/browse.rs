@@ -24,15 +24,16 @@
 // Either way the listing runs in a **spawned** task: the shell pump (`client::stream`)
 // must stay free to move terminal bytes while a slow directory is being read.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use russh_sftp::client::RawSftpSession;
 use russh_sftp::client::error::Error as SftpError;
-use russh_sftp::protocol::{File, FileAttributes, StatusCode};
+use russh_sftp::protocol::{Attrs, File, FileAttributes, Handle, Name, Status, StatusCode};
 use tokio::sync::mpsc;
 
-use super::asuser::{Browse, Runner};
+use super::asuser::{Browse, Exec, Runner};
 use super::shellfs;
 use crate::bridge::SshEvent;
 use crate::explorer::join;
@@ -164,9 +165,9 @@ const WALK_WAVES_BEFORE_FIND: usize = 2;
 /// every crowded tree click rather than once per connection. `asuser::Accounts` is where such things
 /// are learned and cached (it already remembers where `sftp-server` lives and whether sudo wants a
 /// password); worth adding a third if a server without `find` ever turns up in practice.
-async fn dirs_inside(
-	sftp: &Arc<RawSftpSession>,
-	runner: &Runner,
+async fn dirs_inside<W: Walk + Send + Sync + 'static, E: Exec + Sync>(
+	sftp: &Arc<W>,
+	runner: &E,
 	path: &str,
 ) -> Result<Vec<String>> {
 	let (waves, mut landing) = mpsc::channel(1);
@@ -215,6 +216,65 @@ async fn dirs_inside(
 	}
 }
 
+/// The SFTP requests a directory walk makes, and nothing else (§168).
+///
+/// The walk below is the one piece of cmote whose correctness is a **count**: 32 `readdir`s in
+/// flight answer a crowded folder in 34 round trips, where the same 1,057 requests taken one at a
+/// time cost 334 seconds (§167). Written against `RawSftpSession` that count was unobservable — a
+/// session that will answer anything needs a live server — so the walk could fall back to
+/// one-at-a-time and every test would still pass. §167 recorded that as the finding it is; this is
+/// the seam it asked for.
+///
+/// What makes the count assertable is not how many requests were made — that number is identical
+/// either way — but **how many were in flight at once**, which is the whole of the fix. `Steps`, the
+/// fake below, answers each request only after yielding, so a wave's requests overlap and their
+/// high-water mark is a number a test can read.
+///
+/// It is the same seam [`Exec`](super::asuser::Exec) draws for the shell backend, on the same rule:
+/// a request that is **a value in and a value out** belongs on the trait, and an operation handing
+/// back a live `russh` stream does not. The transfer loops' `open`/`read`/`write` therefore stay on
+/// the concrete session, for exactly the reason `Exec` leaves `stream` off (§46, §113).
+///
+/// **Foreign types on purpose.** A trait speaking a vocabulary of its own would have to translate
+/// `StatusCode::Eof` into it — and then the rule that EOF *ends* a listing while any other error
+/// *fails* it would live in the adapter, the one part of this a fake cannot exercise. Speaking
+/// russh-sftp's own types keeps that rule in the walk, where the tests are. It costs nothing: every
+/// reply shape is constructible (`File::new`, `FileAttributes::set_type`, `Error::Status`).
+trait Walk {
+	/// Open a directory for reading, giving back the handle every `readdir` then quotes.
+	fn opendir(&self, path: String) -> impl Future<Output = Result<Handle, SftpError>> + Send;
+
+	/// The next block of names. The cursor is the SERVER's, which is what lets a wave of these
+	/// be in flight at once: each reply is simply "the next block", whoever asked.
+	fn readdir(&self, handle: String) -> impl Future<Output = Result<Name, SftpError>> + Send;
+
+	/// Follow a path — a symlink included — and say what is at the end of it.
+	fn stat(&self, path: String) -> impl Future<Output = Result<Attrs, SftpError>> + Send;
+
+	/// Give a handle back. A server has a finite number of them.
+	fn close(&self, handle: String) -> impl Future<Output = Result<Status, SftpError>> + Send;
+}
+
+/// The real remote. Each method is the session's own, named explicitly rather than through `self`
+/// so it calls the inherent method instead of recursing into this one.
+impl Walk for RawSftpSession {
+	async fn opendir(&self, path: String) -> Result<Handle, SftpError> {
+		RawSftpSession::opendir(self, path).await
+	}
+
+	async fn readdir(&self, handle: String) -> Result<Name, SftpError> {
+		RawSftpSession::readdir(self, handle).await
+	}
+
+	async fn stat(&self, path: String) -> Result<Attrs, SftpError> {
+		RawSftpSession::stat(self, path).await
+	}
+
+	async fn close(&self, handle: String) -> Result<Status, SftpError> {
+		RawSftpSession::close(self, handle).await
+	}
+}
+
 /// How many `readdir` requests ride the wire at once (§167).
 ///
 /// One `readdir` reply carries at most 100 names on OpenSSH (`MAX_READDIR_NAMES`), whatever the
@@ -242,7 +302,10 @@ const READDIR_WINDOW: usize = 32;
 /// This is what `SftpSession::read_dir` does, minus the two things it discards: the
 /// `longname` line the owner and group names live in, and `.`/`..`, which the model
 /// drops at ingest anyway (`explorer::is_dot_link`, §19).
-async fn read_names(sftp: &Arc<RawSftpSession>, path: &str) -> Result<Vec<File>> {
+async fn read_names<W: Walk + Send + Sync + 'static>(
+	sftp: &Arc<W>,
+	path: &str,
+) -> Result<Vec<File>> {
 	// Capacity 1 with the producer spawned: the waves are consumed as fast as they land here, and
 	// a bound rather than an unbounded channel is what stops a huge directory being held twice.
 	let (waves, mut landing) = mpsc::channel(1);
@@ -274,8 +337,8 @@ async fn read_names(sftp: &Arc<RawSftpSession>, path: &str) -> Result<Vec<File>>
 /// The waves are NOT in display order — the server returns names in whatever order it keeps them,
 /// which on ext4 is hash order — so whoever consumes these has to put them in order. The pane's
 /// model does it once, when the listing is complete (`Files::chunk`).
-async fn stream_names(
-	sftp: &Arc<RawSftpSession>,
+async fn stream_names<W: Walk + Send + Sync + 'static>(
+	sftp: &Arc<W>,
 	path: &str,
 	waves: &mpsc::Sender<Vec<File>>,
 ) -> Result<()> {
@@ -348,8 +411,8 @@ async fn stream_names(
 /// which on a link measured at 316 ms is sixteen seconds to answer "which of these are folders".
 /// A real directory still costs nothing extra — only symlinks are asked about at all — and the
 /// order the answers come back in does not matter, since `Explorer::listed` sorts the children.
-async fn keep_dirs(
-	sftp: &Arc<RawSftpSession>,
+async fn keep_dirs<W: Walk + Send + Sync + 'static>(
+	sftp: &Arc<W>,
 	path: &str,
 	files: Vec<File>,
 ) -> Result<Vec<String>> {
@@ -809,6 +872,442 @@ async fn fail_dir(events: &mpsc::Sender<SshEvent>, path: String, reason: String)
 async fn fail_files(events: &mpsc::Sender<SshEvent>, request: u64, reason: String) {
 	eprintln!("files listing failed: {reason}");
 	let _ = events.send(SshEvent::FilesFailed { request, reason }).await;
+}
+
+/// A remote that answers a walk out of a script instead of over a socket (§168), for the walk tests
+/// below. The shell half of the same tests uses `shellfs::Script`, which does this for `Exec`.
+///
+/// It records every request, and — the part that matters — how many were **in flight at once**. A
+/// walk that awaited each `readdir` before sending the next makes exactly as many requests as one
+/// that sends them in waves, so the count alone cannot tell the 334-second version from the
+/// 8.7-second one (§167). The high-water mark can.
+#[cfg(test)]
+#[derive(Default)]
+struct Steps {
+	/// Every request made, in order, as `"opendir /p"`, `"readdir h"`, `"stat /p/l"`, `"close h"`.
+	///
+	/// A `Mutex` rather than a `RefCell` because `Walk`'s futures are `Send` and a `&RefCell` is
+	/// not — the same bound making the same choice it makes for `Script`.
+	made: std::sync::Mutex<Vec<String>>,
+	/// In flight now, and the most that ever were at once.
+	live: std::sync::Mutex<(usize, usize)>,
+	/// What each `readdir` answers, in order. An **exhausted queue answers EOF**, which is what a
+	/// real server does when a directory runs out — so a test only queues the interesting replies.
+	replies: std::sync::Mutex<std::collections::VecDeque<Result<Vec<File>, SftpError>>>,
+	/// The paths `stat` answers as a directory, and the ones it answers as a plain file. Any other
+	/// path is "no such file" — a dangling symlink.
+	dirs: Vec<String>,
+	plain: Vec<String>,
+}
+
+#[cfg(test)]
+impl Steps {
+	/// A remote whose directory answers `replies` and then ends.
+	fn answering(replies: Vec<Result<Vec<File>, SftpError>>) -> Self {
+		Self {
+			replies: std::sync::Mutex::new(replies.into()),
+			..Self::default()
+		}
+	}
+
+	/// A remote holding `blocks` blocks of one name each — enough to make a walk take waves.
+	fn holding(blocks: usize) -> Self {
+		Self::answering(
+			(0..blocks)
+				.map(|which| Ok(vec![plain_file(&format!("f{which}"))]))
+				.collect(),
+		)
+	}
+
+	/// Note a request as begun, and raise the high-water mark if this one is the highest yet.
+	///
+	/// Its own function so the guards are temporaries that drop at the end of each statement, never
+	/// held across an `.await` — a live `MutexGuard` is what would cost `Walk`'s futures their
+	/// `Send`, and the compiler would say so.
+	fn enter(&self, request: String) {
+		self.made
+			.lock()
+			.expect("no test panics while holding this lock")
+			.push(request);
+		let mut live = self
+			.live
+			.lock()
+			.expect("no test panics while holding this lock");
+		live.0 += 1;
+		live.1 = live.1.max(live.0);
+	}
+
+	/// Note a request as answered.
+	fn leave(&self) {
+		self.live
+			.lock()
+			.expect("no test panics while holding this lock")
+			.0 -= 1;
+	}
+
+	/// The most requests that were ever in flight at once.
+	fn peak(&self) -> usize {
+		self.live
+			.lock()
+			.expect("no test panics while holding this lock")
+			.1
+	}
+
+	/// How many requests of one kind were made — `"readdir"`, `"opendir"`, `"stat"`, `"close"`.
+	fn counted(&self, kind: &str) -> usize {
+		self.made
+			.lock()
+			.expect("no test panics while holding this lock")
+			.iter()
+			.filter(|request| request.starts_with(kind))
+			.count()
+	}
+
+	/// The arguments of every request of one kind, in the order they were made.
+	fn arguments(&self, kind: &str) -> Vec<String> {
+		self.made
+			.lock()
+			.expect("no test panics while holding this lock")
+			.iter()
+			.filter_map(|request| request.strip_prefix(kind)?.trim().to_owned().into())
+			.collect()
+	}
+}
+
+#[cfg(test)]
+impl Walk for Steps {
+	/// Not an `async fn`, though the trait allows it and `RawSftpSession`'s impl is one: there is
+	/// nothing here to await, and saying so with `future::ready` is the same choice `Script` makes
+	/// for the same reason (§113). `readdir` and `stat` DO await — that is their whole point.
+	fn opendir(&self, path: String) -> impl Future<Output = Result<Handle, SftpError>> + Send {
+		self.enter(format!("opendir {path}"));
+		self.leave();
+		std::future::ready(Ok(Handle {
+			id: 0,
+			handle: "h".to_owned(),
+		}))
+	}
+
+	async fn readdir(&self, handle: String) -> Result<Name, SftpError> {
+		self.enter(format!("readdir {handle}"));
+		// The yield is the whole mechanism. Every request in a wave reaches this point before any
+		// of them answers, so `live` climbs to the width of the wave; awaited one at a time it
+		// never passes 1. `#[tokio::test]` runs on the current thread, which is what makes the
+		// number exact rather than a race — on a multi-thread runtime a reply could land before
+		// the last request had left.
+		tokio::task::yield_now().await;
+		let reply = self
+			.replies
+			.lock()
+			.expect("no test panics while holding this lock")
+			.pop_front();
+		self.leave();
+		match reply {
+			Some(Ok(files)) => Ok(Name { id: 0, files }),
+			Some(Err(error)) => Err(error),
+			// A directory that has run out says so. This is the reply the walk must read as an
+			// ending rather than a failure.
+			None => Err(eof()),
+		}
+	}
+
+	async fn stat(&self, path: String) -> Result<Attrs, SftpError> {
+		self.enter(format!("stat {path}"));
+		tokio::task::yield_now().await;
+		self.leave();
+		let mut attrs = FileAttributes::default();
+		if self.dirs.contains(&path) {
+			attrs.set_dir(true);
+			Ok(Attrs { id: 0, attrs })
+		} else if self.plain.contains(&path) {
+			attrs.set_regular(true);
+			Ok(Attrs { id: 0, attrs })
+		} else {
+			Err(SftpError::Status(Status {
+				id: 0,
+				status_code: StatusCode::NoSuchFile,
+				error_message: "no such file".to_owned(),
+				language_tag: String::new(),
+			}))
+		}
+	}
+
+	fn close(&self, handle: String) -> impl Future<Output = Result<Status, SftpError>> + Send {
+		self.enter(format!("close {handle}"));
+		self.leave();
+		std::future::ready(Ok(Status {
+			id: 0,
+			status_code: StatusCode::Ok,
+			error_message: String::new(),
+			language_tag: String::new(),
+		}))
+	}
+}
+
+/// The reply a server sends when a directory has no more names.
+#[cfg(test)]
+fn eof() -> SftpError {
+	SftpError::Status(Status {
+		id: 0,
+		status_code: StatusCode::Eof,
+		error_message: String::new(),
+		language_tag: String::new(),
+	})
+}
+
+/// One listed name of each kind the walk has to tell apart.
+#[cfg(test)]
+fn named(name: &str, set: impl Fn(&mut FileAttributes)) -> File {
+	let mut attrs = FileAttributes::default();
+	set(&mut attrs);
+	File {
+		filename: name.to_owned(),
+		longname: String::new(),
+		attrs,
+	}
+}
+
+#[cfg(test)]
+fn dir_file(name: &str) -> File {
+	named(name, |attrs| attrs.set_dir(true))
+}
+
+#[cfg(test)]
+fn plain_file(name: &str) -> File {
+	named(name, |attrs| attrs.set_regular(true))
+}
+
+#[cfg(test)]
+fn link_file(name: &str) -> File {
+	named(name, |attrs| attrs.set_symlink(true))
+}
+
+/// The walk, driven through the seam §167 said it did not have (§168).
+#[cfg(test)]
+mod walk_tests {
+	use super::*;
+	use crate::ssh::shellfs::Script;
+
+	/// The one that would have caught a regression from waves back to one-at-a-time — and the
+	/// reason this whole seam exists. Note what is NOT asserted: the request count, which is
+	/// identical either way. 1,057 requests sent 32 at a time and 1,057 sent in turn differ only in
+	/// how many were outstanding, and that difference was 334 seconds against 8.7 (§167).
+	#[tokio::test]
+	async fn a_wave_of_readdirs_is_in_flight_at_once_and_not_a_queue_of_one() {
+		let steps = Arc::new(Steps::holding(3));
+
+		let names = read_names(&steps, "/p").await.expect("the walk finished");
+
+		assert_eq!(names.len(), 3, "every queued name arrived");
+		assert_eq!(
+			steps.peak(),
+			READDIR_WINDOW,
+			"a whole wave was outstanding at once, not one request at a time"
+		);
+		assert_eq!(steps.counted("opendir"), 1, "one handle for the listing");
+		assert_eq!(steps.counted("close"), 1, "given back at the end");
+	}
+
+	/// A directory shown short of what it holds, with nothing saying so, is the one outcome worse
+	/// than an error message — so anything that is not EOF fails the whole listing.
+	#[tokio::test]
+	async fn a_real_error_fails_the_listing_rather_than_shortening_it() {
+		let steps = Arc::new(Steps::answering(vec![
+			Ok(vec![plain_file("a")]),
+			Err(SftpError::Status(Status {
+				id: 0,
+				status_code: StatusCode::PermissionDenied,
+				error_message: "denied".to_owned(),
+				language_tag: String::new(),
+			})),
+		]));
+
+		let failed = read_names(&steps, "/p")
+			.await
+			.expect_err("a refused listing");
+
+		assert!(
+			format!("{failed:#}").contains("/p"),
+			"the failure names the folder the user asked for: {failed:#}"
+		);
+		assert_eq!(
+			steps.counted("close"),
+			1,
+			"the handle goes back on the way out of a failure too"
+		);
+	}
+
+	/// The other 31 requests of a wave were sent before anyone knew the directory had ended, and
+	/// the ones that came back with names came back with real ones.
+	#[tokio::test]
+	async fn the_rest_of_a_wave_survives_one_reply_saying_eof() {
+		let steps = Arc::new(Steps::answering(vec![
+			Err(eof()),
+			Ok(vec![plain_file("a")]),
+			Ok(vec![plain_file("b")]),
+		]));
+
+		let names = read_names(&steps, "/p").await.expect("the walk finished");
+
+		let mut found: Vec<String> = names.into_iter().map(|file| file.filename).collect();
+		found.sort();
+		assert_eq!(
+			found,
+			vec!["a".to_owned(), "b".to_owned()],
+			"an early EOF ended the walk without discarding the wave it arrived in"
+		);
+	}
+
+	/// EOF is a MUST in draft-ietf-secsh-filexfer-02 §6.7, so a whole wave of empty replies means
+	/// this server will never send one. The single-`readdir` loop this walk replaced spun on that
+	/// forever; stopping is the one prior behaviour deliberately not preserved (§167).
+	#[tokio::test]
+	async fn a_wave_that_lands_no_names_at_all_stops_the_walk() {
+		let empty = (0..READDIR_WINDOW).map(|_| Ok(Vec::new())).collect();
+		let steps = Arc::new(Steps::answering(empty));
+
+		let names = read_names(&steps, "/p").await.expect("the walk finished");
+
+		assert!(names.is_empty(), "there were no names to find");
+		assert_eq!(
+			steps.counted("readdir"),
+			READDIR_WINDOW,
+			"one wave and no more — a second would be a server being asked to prove itself twice"
+		);
+	}
+
+	/// A symlink's own type says nothing about what it points at, so the tree resolves each one —
+	/// and only each one. The round trips are per symlink, never per entry.
+	#[tokio::test]
+	async fn only_the_symlinks_are_resolved_and_a_broken_one_is_left_out() {
+		let steps = Arc::new(Steps {
+			dirs: vec!["/p/to_dir".to_owned()],
+			plain: vec!["/p/to_file".to_owned()],
+			..Steps::default()
+		});
+
+		let mut kept = keep_dirs(
+			&steps,
+			"/p",
+			vec![
+				dir_file("real"),
+				plain_file("file"),
+				link_file("to_dir"),
+				link_file("to_file"),
+				link_file("dangling"),
+			],
+		)
+		.await
+		.expect("the folders were sorted out");
+		kept.sort();
+
+		assert_eq!(
+			kept,
+			vec!["real".to_owned(), "to_dir".to_owned()],
+			"a link to a folder is a branch; a link to a file and a broken link are not"
+		);
+		let mut asked = steps.arguments("stat");
+		asked.sort();
+		assert_eq!(
+			asked,
+			vec![
+				"/p/dangling".to_owned(),
+				"/p/to_dir".to_owned(),
+				"/p/to_file".to_owned()
+			],
+			"the folder and the plain file cost no round trip at all"
+		);
+		assert_eq!(steps.peak(), 3, "and the three that did went out together");
+	}
+
+	/// The adaptive route, from the side that should not reach the shell. Nearly every folder is
+	/// this one, which is why the walk goes first: `find` needs a channel of its own, and that is
+	/// two or three round trips against the one this took (§167).
+	#[tokio::test]
+	async fn a_folder_small_enough_to_walk_never_asks_the_shell() {
+		let steps = Arc::new(Steps::answering(vec![Ok(vec![dir_file("child")])]));
+		let script = Script::refusing();
+
+		let dirs = dirs_inside(&steps, &script, "/p")
+			.await
+			.expect("the walk answered");
+
+		assert_eq!(dirs, vec!["child".to_owned()], "answered by the walk");
+		assert!(
+			script.commands().is_empty(),
+			"and the shell was never reached: {:?}",
+			script.commands()
+		);
+	}
+
+	/// The other side of it. A folder still going after `WALK_WAVES_BEFORE_FIND` waves is one the
+	/// walk is the wrong tool for, so the question is asked the other way — which is the whole
+	/// point of watching rather than guessing.
+	#[tokio::test]
+	async fn a_folder_too_big_to_walk_is_asked_of_the_shell_instead() {
+		// Three waves' worth: one wave consumes up to `READDIR_WINDOW` replies, so this is more
+		// than the budget of two and a wave arrives after the last allowed one, which is the
+		// signal. Spelled as a fixed number rather than off `WALK_WAVES_BEFORE_FIND` on purpose —
+		// scaled to the constant this test could never fail on it, and the budget is a decision
+		// (§167), so raising it past three should make a test speak up.
+		let steps = Arc::new(Steps::holding(READDIR_WINDOW * 3));
+		let script = Script::saying("/p/x\0/p/y\0");
+
+		let dirs = dirs_inside(&steps, &script, "/p")
+			.await
+			.expect("find answered");
+
+		assert_eq!(
+			dirs,
+			vec!["x".to_owned(), "y".to_owned()],
+			"the names find printed, not the ones the walk had read"
+		);
+		assert!(
+			script.only_command().starts_with("find -L '/p'"),
+			"asked with the path quoted: {}",
+			script.only_command()
+		);
+	}
+
+	/// `find` is not trusted to exist: a server without it exits non-zero, and then the walk has to
+	/// finish the job however slow that is. A second `opendir` is what proves it did.
+	#[tokio::test]
+	async fn a_server_without_find_falls_back_to_finishing_the_walk() {
+		let steps = Arc::new(Steps::holding(READDIR_WINDOW * 3));
+		let script = Script::refusing();
+
+		dirs_inside(&steps, &script, "/p")
+			.await
+			.expect("the walk finished what find would not");
+
+		assert_eq!(
+			steps.counted("opendir"),
+			2,
+			"the abandoned walk, and then the one that finished the folder"
+		);
+	}
+
+	/// Dropping the receiver is what stops an abandoned walk, rather than aborting its task — and
+	/// the difference is a directory handle. `stream_names` sees the send fail, breaks, and closes
+	/// the handle on its way out; an `abort()` would have skipped that and leaked one per switch.
+	#[tokio::test]
+	async fn an_abandoned_walk_still_gives_the_handle_back() {
+		let steps = Arc::new(Steps::holding(READDIR_WINDOW * 3));
+
+		let _ = dirs_inside(&steps, &Script::saying(""), "/p").await;
+
+		// The producer is not joined in the overflow path — it winds down on its own — so let the
+		// runtime finish it before reading the record. Deterministic here because the walk has only
+		// a failed send and one `close` left to do.
+		for _ in 0..8 {
+			tokio::task::yield_now().await;
+		}
+		assert_eq!(
+			steps.counted("close"),
+			1,
+			"the handle was given back by the walk that was left behind"
+		);
+	}
 }
 
 #[cfg(test)]
