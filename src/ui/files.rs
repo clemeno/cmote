@@ -647,9 +647,9 @@ fn visible_rows(scroll: f32, height: f32, total_rows: usize) -> std::ops::Range<
 }
 
 /// A blank stripe standing in for the grid rows that are not built (§166). It holds the
-/// scrollable's extent open, so the scrollbar's size and travel are the same as they would be if
-/// every cell existed — which is what lets the grid be virtual without the rest of the pane
-/// knowing it is.
+/// scrollable's extent open, so the scrollbar's size and travel are what they would be if every
+/// cell existed — bar one row's trailing gap, `entry_grid` says why — which is what lets the grid
+/// be virtual without the rest of the pane knowing it is.
 fn spacer<'a>(height: f32) -> Element<'a, Message> {
 	container(text("")).height(Length::Fixed(height)).into()
 }
