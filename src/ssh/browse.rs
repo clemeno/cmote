@@ -172,12 +172,7 @@ async fn dirs_inside<W: Walk + Send + Sync + 'static, E: Exec + Sync>(
 	runner: &E,
 	path: &str,
 ) -> Result<Vec<String>> {
-	let (waves, mut landing) = mpsc::channel(1);
-	let producer = tokio::spawn({
-		let sftp = Arc::clone(sftp);
-		let path = path.to_owned();
-		async move { stream_names(&sftp, &path, &waves).await }
-	});
+	let (producer, mut landing) = spawn_walk(sftp, path);
 
 	// Read up to the budget, and notice the wave that arrives AFTER it: that arrival is the whole
 	// signal. A folder that ends within the budget closes the channel instead, so a folder whose
@@ -193,13 +188,8 @@ async fn dirs_inside<W: Walk + Send + Sync + 'static, E: Exec + Sync>(
 	}
 
 	if !overflowed {
-		return match producer.await {
-			Ok(Ok(())) => keep_dirs(sftp, path, read.concat()).await,
-			Ok(Err(failure)) => Err(failure),
-			Err(join) => {
-				Err(anyhow::Error::new(join)).with_context(|| format!("Could not list {path}"))
-			}
-		};
+		finish(producer, path).await?;
+		return keep_dirs(sftp, path, read.concat()).await;
 	}
 
 	// Big enough that reading every name is the wrong way to find the folders. Dropping the
@@ -308,21 +298,48 @@ async fn read_names<W: Walk + Send + Sync + 'static>(
 	sftp: &Arc<W>,
 	path: &str,
 ) -> Result<Vec<File>> {
-	// Capacity 1 with the producer spawned: the waves are consumed as fast as they land here, and
-	// a bound rather than an unbounded channel is what stops a huge directory being held twice.
-	let (waves, mut landing) = mpsc::channel(1);
+	let (producer, mut landing) = spawn_walk(sftp, path);
+	let mut files = Vec::new();
+	while let Some(wave) = landing.recv().await {
+		files.extend(wave);
+	}
+	finish(producer, path).await?;
+	Ok(files)
+}
+
+/// Start a walk in a task of its own, giving back the waves it lands and the handle to `finish` on
+/// (§168). All three callers of `stream_names` want this same pair, and each grew its own copy of it
+/// one commit at a time.
+///
+/// Capacity 1, with the walk spawned: the waves are consumed as fast as they land, and a bound
+/// rather than an unbounded channel is what stops a huge directory being held twice — once by the
+/// channel and once by whoever is draining it.
+fn spawn_walk<W: Walk + Send + Sync + 'static>(
+	sftp: &Arc<W>,
+	path: &str,
+) -> (
+	tokio::task::JoinHandle<Result<()>>,
+	mpsc::Receiver<Vec<File>>,
+) {
+	let (waves, landing) = mpsc::channel(1);
 	let producer = tokio::spawn({
 		let sftp = Arc::clone(sftp);
 		let path = path.to_owned();
 		async move { stream_names(&sftp, &path, &waves).await }
 	});
+	(producer, landing)
+}
 
-	let mut files = Vec::new();
-	while let Some(wave) = landing.recv().await {
-		files.extend(wave);
-	}
+/// What a spawned walk has to say once its waves have run out: nothing, its own failure, or the
+/// task's (§168).
+///
+/// The third case is not the same as the second and is worth keeping distinct: a `JoinError` means
+/// the walk PANICKED or was cancelled, so no listing exists at all, where a walk error is a server
+/// that answered with a refusal. Both fail the listing, and naming the folder is what makes either
+/// message actionable — the rule `fail_dir` states.
+async fn finish(producer: tokio::task::JoinHandle<Result<()>>, path: &str) -> Result<()> {
 	match producer.await {
-		Ok(Ok(())) => Ok(files),
+		Ok(Ok(())) => Ok(()),
 		Ok(Err(failure)) => Err(failure),
 		Err(join) => {
 			Err(anyhow::Error::new(join)).with_context(|| format!("Could not list {path}"))
@@ -475,12 +492,7 @@ async fn all_sftp(
 	request: u64,
 	events: mpsc::Sender<SshEvent>,
 ) {
-	let (waves, mut landing) = mpsc::channel(1);
-	let producer = tokio::spawn({
-		let sftp = Arc::clone(&sftp);
-		let path = path.clone();
-		async move { stream_names(&sftp, &path, &waves).await }
-	});
+	let (producer, mut landing) = spawn_walk(&sftp, &path);
 
 	while let Some(wave) = landing.recv().await {
 		// Cut to `files::BATCH` on the way out: a wave is up to `READDIR_WINDOW` × 100 names, and
@@ -502,10 +514,10 @@ async fn all_sftp(
 		}
 	}
 
-	match producer.await {
+	match finish(producer, &path).await {
 		// One empty batch closes the listing. It is what tells an EMPTY directory to stop waiting
 		// too, so the same message ends both cases and neither needs a rule of its own.
-		Ok(Ok(())) => {
+		Ok(()) => {
 			let _ = events
 				.send(SshEvent::FilesChunk {
 					request,
@@ -517,11 +529,7 @@ async fn all_sftp(
 		// A failure after some waves have already gone leaves those rows on screen with the reason
 		// on the notice line — which is the honest report. What must not happen is a short listing
 		// presented as a whole one, and `FilesFailed` is what stops that.
-		Ok(Err(error)) => fail_files(&events, request, format!("{error}")).await,
-		Err(join) => {
-			let reason = format!("The listing did not finish: {join}");
-			fail_files(&events, request, reason).await;
-		}
+		Err(error) => fail_files(&events, request, format!("{error}")).await,
 	}
 }
 
