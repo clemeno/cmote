@@ -128,10 +128,20 @@ _Avoid_: panel, which is a different thing here — see **Panel**
 
 **Walk**:
 Reading a remote directory by asking the server for its names, a `readdir` reply at a time —
-and the trait naming the four requests that takes: `opendir`, `readdir`, `stat`, `close`
-(§167, §168). The tree's walk keeps only the folders, the pane's keeps everything, and both
-pay the same trips because SFTP has no directories-only filter.
+and the trait naming the requests that takes: `opendir`, `readdir`, `stat`, `close`, plus
+`lstat`, `remove` and `rmdir` for the delete (§167, §168, §169). The tree's walk keeps only the
+folders, the pane's keeps everything, and both pay the same trips because SFTP has no
+directories-only filter.
 _Avoid_: crawl, traversal
+
+**Delete walk**:
+The second walk, and a different job: `remove_subtree` reads a whole subtree to take it away
+(§18, §169). It never follows a symlink — a link is one name to unlink, and following it would
+delete what it points at — and it removes folders deepest first, because a server refuses a
+folder with anything still inside. Both rules are the opposite of what a listing walk does with
+a link, which is resolve it.
+_Avoid_: recursive delete, which it is not — it is breadth-first, so a deep tree costs heap
+rather than stack
 
 **Wave**:
 The `readdir` requests a walk puts on the wire at once — `READDIR_WINDOW` of them, sent

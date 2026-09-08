@@ -208,7 +208,13 @@ async fn dirs_inside<W: Walk + Send + Sync + 'static, E: Exec + Sync>(
 	}
 }
 
-/// The SFTP requests a directory walk makes, and nothing else (§168).
+/// The SFTP requests a directory walk makes, and nothing else (§168, widened in §169).
+///
+/// Two walks now, not one. The listing walk reads a folder's names; the delete walk reads a whole
+/// subtree and takes it away, and it was the seam's second customer rather than a second seam
+/// because it asks the same questions plus three: `lstat`, `remove`, `rmdir`. The rules that
+/// earned it are about what a delete must NOT do — never follow a symlink, never remove a folder
+/// before what is inside it — and neither was a test until this trait reached them (§169).
 ///
 /// The walk below is the one piece of cmote whose correctness is a **count**: 32 `readdir`s in
 /// flight answer a crowded folder in 34 round trips, where the same 1,057 requests taken one at a
@@ -908,6 +914,12 @@ async fn fail_files(events: &mpsc::Sender<SshEvent>, request: u64, reason: Strin
 
 /// A remote that answers a walk out of a script instead of over a socket (§168), for the walk tests
 /// below. The shell half of the same tests uses `shellfs::Script`, which does this for `Exec`.
+///
+/// It answers in two shapes, because the two walks ask different things of it. A listing test wants
+/// a SCRIPT — this reply, then that one, then an error — and gets `replies`, one queue for whoever
+/// asks. A delete test wants a SHAPE: folders inside folders, and names at each depth. That is
+/// `tree`, keyed by path, and with it goes `present` — what is still there — so that `rmdir` can
+/// refuse a folder with names in it the way a server does (§169).
 ///
 /// It records every request, and — the part that matters — how many were **in flight at once**. A
 /// walk that awaited each `readdir` before sending the next makes exactly as many requests as one

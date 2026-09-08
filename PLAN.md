@@ -19660,9 +19660,10 @@ protocol down, and on the same rule: **a request that is a value in and a value 
 trait; an operation handing back a live `russh` stream does not.** The transfer loops' `open`, `read`
 and `write` therefore stay on the concrete session, exactly as `Exec` leaves `stream` off.
 
-It is an **internal** seam. `Browse::Sftp` still carries a concrete `Arc<RawSftpSession>`, nothing
-outside the module knows the trait exists, and the delete walk keeps calling the session directly for
-`lstat`, `remove` and `rmdir`. What crosses the seam is one module's own tests.
+It is an **internal** seam. `Browse::Sftp` still carries a concrete `Arc<RawSftpSession>`, and
+nothing outside the module knows the trait exists. What crosses the seam is one module's own tests.
+(The delete walk called the session directly for `lstat`, `remove` and `rmdir` when this was written;
+§169 brought it across.)
 
 **The trait speaks russh-sftp's own types, on purpose.** A vocabulary of its own would have to
 translate `StatusCode::Eof` into it — and then the rule that EOF *ends* a listing while any other
@@ -19831,6 +19832,9 @@ first — and `remove` and `rmdir` would be two more methods on the trait to rea
 with a real ordering rule and no test. It is also not what §167 flagged, and a seam widened to cover
 everything nearby is how a test-only trait turns into a second filesystem API.
 
+*Done in §169, as its own piece of work rather than as part of this one — and it took three methods,
+not two: `lstat` is what makes a delete a delete.*
+
 ### What to keep
 
 **A property that is invisible to the suite is a design finding, not a testing gap.** The instinct on
@@ -19869,3 +19873,102 @@ per-row path build and set lookup were always the bulk and both routes pay them.
 rather than the flattering framing is what keeps the next reader from budgeting for a saving that is
 not there — and it is what turns "make it faster" into a specific remaining question: whether the
 three numbers should be state the model maintains.
+
+## §169 — The delete's rules were comments, and two of them were about not losing data
+
+§168 built a seam for the listing walk and named the next candidate in the same breath:
+`remove_subtree`, real logic with a real ordering rule and no test. This is that, and the reason it
+was worth doing on its own is what the rules turned out to be.
+
+The delete has four rules. Two are about **what it must not do**, and both of those reach outside
+what the user selected:
+
+```
+a symlink is unlinked, NEVER followed        -- else it empties whatever it points at
+a folder goes only when nothing is inside it -- else the removal is refused halfway
+files and folders both, whatever the depth
+a refusal names WHICH name would not go      -- the delete stops there
+```
+
+Every one of them was a comment. The first two are data-loss rules a passing suite said nothing
+about.
+
+### One seam, a second customer
+
+`Walk` gained `lstat`, `remove` and `rmdir`, and `remove_tree` and `remove_subtree` became generic
+over it. Not a second seam: the delete walk asks the listing walk's four questions and three more,
+so a trait of its own would have been the same fake twice. Three methods, no new fixture type — and
+the choice §168 made about **speaking russh-sftp's own types** paid again here, because `lstat` and
+`stat` differ in nothing but which list the fake consults first, which is exactly how they differ on
+a server.
+
+### What the fake had to learn to be able to fail
+
+`Steps` answered a script: this reply, then that one, then an error. That is what a listing test
+wants, one directory deep. A delete test wants a **shape** — folders inside folders, names at each
+depth — so `tree` arrived beside `replies`, keyed by path, and `opendir` now hands back the path as
+the handle so a `readdir` says which directory it is reading. With no tree given, the flat script
+still answers: the nine listing tests are untouched.
+
+**And the ordering test needed the server's own refusal.** A fake whose `rmdir` always succeeds
+records the order faithfully and cannot fail on it — a parent taken before its children looks like a
+parent taken after them, just earlier in the list. So `present` holds what is still there and `rmdir`
+refuses while any name sits under the path. That is the whole difference between a test that reads
+the order back and a test that **fails** on it, and it is the third time this arc that the fake, not
+the assertion, was where the falsifiability lived.
+
+Four tests, one per rule:
+
+```
+a link to a folder is unlinked, and the tree behind it left alone   (remove_tree, via lstat)
+a tree goes deepest first, so no rmdir finds names still inside    (remove_subtree, via present)
+a link inside the tree is unlinked with the files, never followed   (remove_subtree, via the listing)
+a refused name stops the delete, and the failure says which one
+```
+
+The first and third are the **same rule at two places**, and that is deliberate. At the root a link
+is caught by asking `lstat`; inside the tree nothing is asked at all, because the listing already
+said what each name is. One line decides each, and the first one passing says nothing about the
+second.
+
+### The prove-it, and one probe that could not be run as written
+
+Each break reverted, each failing at its assertion:
+
+* `lstat` -> `stat` in `remove_tree`: `["/p/link/precious"]` where `["/p/link"]` was expected — the
+  file on the far side of the link, deleted.
+* `.rev()` dropped from the directory loop: `Failure: /p is not empty`, in the fake's voice because it
+  is the server's.
+* `is_dir()` -> `is_dir() || is_symlink()`, the plausible version of the mistake: the link was
+  descended into instead of unlinked.
+* the `with_context` dropped from the file removal: `Permission denied: denied`, naming nothing the
+  user could act on.
+
+**The first probe would not compile.** Replacing the one `lstat` call left the trait method unused,
+and `warnings = "deny"` makes dead code an error — so the break was caught by the compiler before the
+test could speak. Two throwaway `allow`s stood in to reach the red, and came out with the break.
+Worth noticing rather than skipping: *the compiler catching a break is a weaker result than it
+looks*, because it only holds while that call is the method's one caller. It says nothing about the
+rule; a second caller anywhere and the same break compiles silently. The red test is what pins the
+rule, so it was worth the two temporary lines to see it.
+
+### What to keep
+
+**A seam's second customer is cheaper than its first, and the rules it reaches can be worth more.**
+§168's seam cost a trait, a fake and a design argument about foreign types, to pin a performance
+property. Widening it cost three methods and reached two data-loss rules. The instinct that says "a
+seam widened to cover everything nearby is how a test-only trait turns into a second filesystem API"
+is right — and the answer is not to refuse the widening but to ask what rules are on the other side
+of it.
+
+**The same rule at two places is two tests.** Not duplication: `remove_tree` and `remove_subtree`
+each decide "is this a link" on their own line, by different means. What makes the pair worth writing
+is that the *wrong* reading is right elsewhere in the same module — `keep_dirs` resolves every listed
+link on purpose, because a link to a folder is a branch of the tree pane (§19). The regression to
+fear here is not a slip, it is a copy of forty lines up.
+
+**A fake that cannot refuse cannot make an order fail.** The rule under test was "deepest first", and
+the assertion that reads the order back passes on any order at all. What made it a test was teaching
+the fake the precondition the real server enforces. When a rule is about *sequence*, ask what would go
+wrong on the real thing if the sequence were wrong, and put that in the fake — the assertion is the
+easy half.
