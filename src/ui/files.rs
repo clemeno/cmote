@@ -1319,6 +1319,70 @@ mod tests {
 		assert_eq!(shown.chars().count(), max);
 	}
 
+	/// A pane showing `/home`, holding `entries`, with every one of them selected.
+	fn selected_pane(entries: &[Entry]) -> Files {
+		let mut files = Files::default();
+		let request = files.show("/home").expect("a new directory needs listing");
+		files.chunk(request, entries.to_vec(), true);
+		files.select_all(true);
+		files
+	}
+
+	/// An entry of `kind` named `name`, carrying `size` when it has one.
+	fn sized(name: &str, kind: FilesKind, size: Option<u64>) -> Entry {
+		Entry {
+			name: name.to_owned(),
+			kind,
+			meta: crate::files::Meta {
+				size,
+				..crate::files::Meta::default()
+			},
+		}
+	}
+
+	/// The three lines a multiple selection puts on the card (§21).
+	///
+	/// Green the moment it was written, and deliberately so: it went in BEFORE §168 moved the
+	/// counting off `selected_rows`, as a net under a change meant to alter nothing a user sees.
+	/// Not a red-green slice, and not pretending to be one — the expected strings are literals
+	/// worked out by hand (5 entries, 2 of them folders, 100 + 200 + 300 bytes of files), so they
+	/// disagree with the code rather than restating it.
+	#[test]
+	fn a_multiple_selection_is_summarised_as_items_folders_and_the_bytes_of_the_files() {
+		let files = selected_pane(&[
+			sized("docs", FilesKind::Dir, Some(4096)),
+			sized("src", FilesKind::Dir, Some(4096)),
+			sized("a.txt", FilesKind::File, Some(100)),
+			sized("b.txt", FilesKind::File, Some(200)),
+			sized("c.txt", FilesKind::File, Some(300)),
+		]);
+
+		assert_eq!(
+			summary(&files, true),
+			vec![
+				"5 items selected".to_owned(),
+				"2 folders, 3 files".to_owned(),
+				// A folder's own 4096 is the size of its directory entry, not of what is inside
+				// it, so counting it would make the total wrong rather than complete.
+				"600 B".to_owned(),
+			]
+		);
+
+		// The other half of the folder branch: with none, the line does not say "0 folders".
+		let files = selected_pane(&[
+			sized("a.txt", FilesKind::File, Some(1)),
+			sized("b.txt", FilesKind::File, Some(2)),
+		]);
+		assert_eq!(
+			summary(&files, true),
+			vec![
+				"2 items selected".to_owned(),
+				"2 files".to_owned(),
+				"3 B".to_owned(),
+			]
+		);
+	}
+
 	/// A band in pane coordinates: the same numbers `mouse_area::on_move` reports.
 	fn band(x: f32, y: f32, width: f32, height: f32) -> iced::Rectangle {
 		iced::Rectangle {
