@@ -19329,6 +19329,9 @@ carries the measurement and the shape of the fix: ask a cheaper question, rather
 selection. Left standing because 102 ms on a rare Ctrl+A is a different complaint from a minute on
 every folder open, and this section is the second one.
 
+*(Done in §168, where §168's own review found the same function from the other direction — and where
+the measurement showed the fix is worth half of that number, not all of it.)*
+
 ### What to keep
 
 **Per-frame cost times frames is the number; per-frame cost alone is not.** 710 ms reads as a slow
@@ -19767,12 +19770,23 @@ Declined, with the reason rather than silently:
   accessor would collapse the ripple and cost the thing the ripple buys: the match is what makes the
   compiler name every site the day a fourth `Browse` variant exists. Six one-line arms that discard a
   field is what exhaustiveness looks like in Rust, not shotgun surgery.
+Declined at first and then done, because the two findings turned out to be one job:
+
 * **`details(files, entries, show_hidden, width)` is a clump**, and `entries` is derived from
-  `show_hidden`, so the two can disagree. True — and the honest fix is the one §166 parked: a `Files`
-  method answering how many, how many folders, how many bytes, which stops `show_hidden` travelling
-  *and* removes the 102 ms a Select All costs there. Two findings, one job. Bundling the pair into a
-  type would tidy the signature and fix neither, so the clump keeps a `ponytail:` note pointing at
-  the leftover it shares.
+  `show_hidden`, so the two can disagree — and `summary` then derived a third view of the same rows
+  through `selected_rows`. The fix is the one §166 parked: `Files::selection_totals(rows)` answers
+  how many, how many folders and how many bytes directly, so `show_hidden` stops travelling and no
+  path is built per selected entry. Bundling the pair into a type would have tidied the signature and
+  fixed neither.
+
+  **And the measurement is the interesting part.** Over the same Select All of 237,173, indexing the
+  selection took **54 ms** against **27 ms** for counting it — *half, not all*. §166 recorded 102 ms
+  for that path, and this does not remove it, because the cost was never mostly the allocation:
+  building a path per row and asking the set about it is paid by both routes, which is exactly what
+  `selected_rows`' own note called "honest work". 27 ms is still more than a frame, so the ceiling is
+  recorded on `selection_totals` rather than declared gone — O(1) needs the model holding the three
+  numbers across `select`, `deselect`, `select_all`, `extend_selection` and every re-listing that
+  invalidates them.
 
 ### What was not built
 
@@ -19805,3 +19819,18 @@ arithmetic. **The tell is a test whose fixture mentions the constant under test.
 and an arithmetic overflow in the test file, not one observation about the walk. A prove-it has to
 fail *at the assertion*, with the number the code got wrong in the message — otherwise it is only
 noise that happens to be red.
+
+**A fixture built with defaults can make a rule unobservable.** `selection_totals` excludes a
+folder's own size from the byte total, and the model test that names that rule was written with
+`entry("docs", FilesKind::Dir)` — whose `Meta::default()` size is `None`, so the folder contributed
+nothing either way and the exclusion could not be seen. Breaking the rule failed the *view's* net and
+left the model's test green. That is the same defect as §165's un-failable test and as the fixture
+scaled to its own constant above, arriving a third way: **the tell is a fixture whose default value
+happens to be the identity element of the operation under test.**
+
+**Half a fix is a result, not a disappointment — provided the number is written down.** The
+selection counting was expected to remove §166's 102 ms and removes about half of it, because the
+per-row path build and set lookup were always the bulk and both routes pay them. Reporting that
+rather than the flattering framing is what keeps the next reader from budgeting for a saving that is
+not there — and it is what turns "make it faster" into a specific remaining question: whether the
+three numbers should be state the model maintains.
