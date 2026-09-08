@@ -940,6 +940,9 @@ struct Steps {
 	/// The directories of `tree` that have already answered. A directory gives its names once and
 	/// EOF after, the way a server's own cursor does.
 	read: std::sync::Mutex<std::collections::HashSet<String>>,
+	/// The names whose removal is refused — a file the user is not allowed to take away. The
+	/// failure half of a delete, where what matters is that the message says which name it was.
+	refuses: Vec<String>,
 	/// What is still on the remote, so `rmdir` can refuse a directory with names still inside it.
 	/// That refusal is the whole reason a removal ORDER is something a test can fail on: without
 	/// it, taking a parent before its children looks exactly like taking them in the right order.
@@ -1174,6 +1177,9 @@ impl Walk for Steps {
 	fn remove(&self, path: String) -> impl Future<Output = Result<Status, SftpError>> + Send {
 		self.enter(format!("remove {path}"));
 		self.leave();
+		if self.refuses.iter().any(|name| name == &path) {
+			return std::future::ready(Err(denied()));
+		}
 		self.unlink(&path);
 		std::future::ready(Ok(ok()))
 	}
@@ -1190,6 +1196,17 @@ impl Walk for Steps {
 		self.closed.notify_one();
 		std::future::ready(Ok(ok()))
 	}
+}
+
+/// The reply a server sends when the account may not do that.
+#[cfg(test)]
+fn denied() -> SftpError {
+	SftpError::Status(Status {
+		id: 0,
+		status_code: StatusCode::PermissionDenied,
+		error_message: "denied".to_owned(),
+		language_tag: String::new(),
+	})
 }
 
 /// The reply a server sends when a request simply worked.
@@ -1273,12 +1290,7 @@ mod walk_tests {
 	async fn a_real_error_fails_the_listing_rather_than_shortening_it() {
 		let steps = Arc::new(Steps::answering(vec![
 			Ok(vec![plain_file("a")]),
-			Err(SftpError::Status(Status {
-				id: 0,
-				status_code: StatusCode::PermissionDenied,
-				error_message: "denied".to_owned(),
-				language_tag: String::new(),
-			})),
+			Err(denied()),
 		]));
 
 		let failed = read_names(&steps, "/p")
@@ -1575,6 +1587,31 @@ mod walk_tests {
 			steps.arguments("rmdir"),
 			vec!["/p".to_owned()],
 			"one folder was here to remove, whatever the link points at"
+		);
+	}
+
+	/// A delete that half-happened is worth being told about, and worth being told WHERE it stopped
+	/// (§18). The panes re-list either way, so what did go is already visible; the message is the
+	/// only thing that can say what did not.
+	#[tokio::test]
+	async fn a_refused_name_stops_the_delete_and_the_failure_says_which_one() {
+		let steps = Arc::new(Steps {
+			refuses: vec!["/p/locked.txt".to_owned()],
+			..Steps::tree(&[("/p", &[plain_file("locked.txt")])])
+		});
+
+		let failed = remove_subtree(&steps, "/p")
+			.await
+			.expect_err("a refused delete");
+
+		assert!(
+			format!("{failed:#}").contains("/p/locked.txt"),
+			"the name that would not go is the one the user needs: {failed:#}"
+		);
+		assert_eq!(
+			steps.counted("rmdir"),
+			0,
+			"and it stopped there rather than trying to remove the folder around it"
 		);
 	}
 }
