@@ -418,4 +418,53 @@ mod tests {
 			);
 		}
 	}
+
+	/// The same claim, made the only way that can actually check it: with the bytes a real bash
+	/// emitted from this very block.
+	///
+	/// The test above greps the string literal, which catches a typo in an escape and nothing else.
+	/// Two things it cannot see. The block emits all three sequences in ONE `printf` with no
+	/// separator, so whether they frame apart is a question about the reader, not the literal. And
+	/// the path is deliberately NOT percent-encoded (see `BASH_BLOCK`), on the reasoning that
+	/// "cmote's own reader takes a raw path fine" — a claim about a different module, in a comment.
+	/// A reader tightened to take the first token of a URI, which is what any real URI parser does
+	/// with a space in it, would break every install and leave that test green.
+	///
+	/// So: captured from `bash --rcfile -i` (GNU bash 5.2.37) running the block above in a directory
+	/// named `cmote probe`, with `true` and then `false` at the prompt. Verbatim, host name and all.
+	#[test]
+	fn a_real_bash_running_the_block_emits_what_term_reads() {
+		use crate::term::osc133::{Mark, Scanner};
+
+		let emitted =
+			b"\x1b]133;D;0\x07\x1b]7;file://DESKTOP-F9MKD64/tmp/cmote probe\x07\x1b]133;A\x07";
+
+		let mut cwd = crate::term::cwd::Cwd::default();
+		cwd.feed(emitted);
+		assert_eq!(
+			cwd.path(),
+			Some("/tmp/cmote probe"),
+			"the directory the shell is in, space and all, with the host dropped"
+		);
+
+		let marks: Vec<Mark> = Scanner::default()
+			.feed(emitted)
+			.into_iter()
+			.map(|(_, mark)| mark)
+			.collect();
+		assert_eq!(
+			marks,
+			vec![Mark::CommandEnd(Some(0)), Mark::PromptStart],
+			"the command that just ended, carrying its exit code, and the prompt about to be drawn"
+		);
+
+		// From the `false` in the same run: the code reported is the command's own, which is what the
+		// block's `local __cmote_status=$?` and `return $__cmote_status` are there to preserve.
+		let failed = Scanner::default().feed(b"\x1b]133;D;1\x07");
+		assert_eq!(
+			failed.first().map(|(_, mark)| *mark),
+			Some(Mark::CommandEnd(Some(1))),
+			"a failure is reported as a failure, not swallowed by the announcer"
+		);
+	}
 }
