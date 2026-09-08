@@ -19257,3 +19257,371 @@ applies to the section's own prose, not only to the matrix.
 reading the diff against the repo's testing rule; Spec found `k=r` by reading the code against what
 the row claims. Neither brief would have surfaced the other's, which is the argument for not merging
 them into one reviewer with one prompt.
+
+## §166 — Sixty cells are on screen, and 1.9 million were built
+
+A directory of 237,173 entries took the best part of a minute to appear, and left the window
+unusable once it had. Measured in release, before anything was changed:
+
+```
+pane() build, no selection:  710.4 ms
+selected_index():             38.4 ms
+pane() build, with popup:    724.5 ms
+```
+
+710 ms is **one view**. iced rebuilds the whole widget tree on every redraw, so that is the price of
+every frame — and the listing arrives in 238 batches, each of them one message, one `update` and one
+`view`, so opening the folder paid it a couple of hundred times over before it had even finished
+streaming in.
+
+The grid was one `Row::wrap` over `files.rows()`. Every entry became a cell of about eight widgets —
+roughly **1.9 million of them**, to show the sixty a window holds.
+
+### Three mistakes, and they are three different mistakes
+
+**The grid built rows nobody could see.** It now builds only the rows the viewport covers, with two
+rows of slack at each end, between a spacer for everything above and a spacer for everything below.
+The spacers are what make this invisible from outside: they hold the scrollable's extent open, so the
+scrollbar's size and travel — and `row_top`, which the details popup and the rubber band are placed
+by — are exactly what they were when every cell existed. Nothing downstream had to learn that the
+cells are no longer all there.
+
+**Making the wrap explicit costs this view the one thing it got for free, and pays for it twice
+over.** `Row::wrap` followed the window's width without being told the column count; spelling the
+rows out means computing it. But `columns(width)` was **already** the number every other part of the
+pane worked from — `band_hits`, the details popup, the arrow keys — so the free convenience had been
+a second source of truth for where a cell is. The layout and the arithmetic can no longer disagree.
+
+**`index_of` put every row's path together to find one.** It now takes the one path apart instead:
+`explorer::join` run backwards, once. Same comparison, and no string per entry.
+
+**And `rows()` was built three times a frame** — once by the grid, twice by the popup. It is only a
+vector of pointers, but that is 3 ms of them in a folder this size. It is built once in `pane` and
+handed to both, with `selected_index_in` as `selected_index` for a caller that already holds the
+rows. `selected_rows` was in the same shape one level down, allocating a `String` for every entry it
+walked past: it builds into one reused buffer now and clones only a hit, so a lone selection in a
+crowded folder allocates once.
+
+```
+pane() build, no selection:    3.0 ms   (237x)
+pane() build, with popup:      5.2 ms   (139x)
+```
+
+Prove-it, four, each reverted: the bottom edge rounded **down** instead of up (two tests), the row
+window lost its clamp (one test — and the compiler for the other half, since dropping both clamps
+leaves `total_rows` unused), and the root's slash was doubled in `selected_rows`, which nothing
+covered at all until this section added
+`a_selection_at_the_root_is_found_without_doubling_its_slash`.
+
+### What was left over, on purpose
+
+**After a Select All in the same folder the details popup still costs 102 ms a frame.** It calls
+`selected_rows` to print three numbers — how many, how many folders, how many bytes — and that
+materialises the whole selection as owned paths to answer them. The `ponytail:` note on the function
+carries the measurement and the shape of the fix: ask a cheaper question, rather than index the
+selection. Left standing because 102 ms on a rare Ctrl+A is a different complaint from a minute on
+every folder open, and this section is the second one.
+
+### What to keep
+
+**Per-frame cost times frames is the number; per-frame cost alone is not.** 710 ms reads as a slow
+open. It was two hundred slow opens, because a streamed listing redraws once per batch — so the
+batch count belongs in the measurement from the start. The fix's own multiplier (237x) is the same
+arithmetic run the other way.
+
+**Virtualisation is a lie the scrollable must not be able to detect.** Every consumer of this pane
+asks positional questions — where does row *n* start, which cell is under the pointer, how long is
+the scrollbar. Holding the extent open with spacers means all of them keep working without knowing,
+and the alternative — teaching each of them about the window — is how a viewport optimisation turns
+into four subtly disagreeing coordinate systems.
+
+**A convenience that computes something you already compute elsewhere is a second source of truth.**
+`Row::wrap`'s automatic column count was free and correct; it was also a *second* answer to a
+question `columns(width)` was already answering for the rest of the pane. Losing it was the part of
+this change that improves the code rather than the clock.
+
+## §167 — 334 seconds, and the link idle for nearly all of them
+
+Opening one folder on a real server — `/opt/spirtech/sybille/trans/processed`, 105,610 entries, over
+a link with latency — took **334 seconds**. Measured before anything was changed:
+
+```
+sftp readdir 1057 round trips, 105610 names (100/packet), 334.166s
+```
+
+That divides out at **316 ms per round trip**, which is exactly the measured duration of the first
+one. So the cost was latency, all of it, and the machine was doing nothing while it accrued.
+
+Four separate causes, and the interesting part of this section is that **only two of them were slow
+code**. One was a default nobody had chosen. One was a single click asking two questions.
+
+### The comparator, and a fixture that lied
+
+`sort` and `name_cmp` both spelled the case-insensitive comparison
+`left.to_lowercase().cmp(&right.to_lowercase())` — two `String` allocations per comparison, n log n
+times. Comparing the lowercase **character streams** instead measured 329 ms → 137 ms on 116,734
+unsorted names for the identical order, allocating nothing and reading each name only as far as its
+first difference.
+
+Unsorted is the case that matters, and it is the **remote** one: a server hands back names in
+whatever order it keeps them (ext4 returns hash order). Locally this was never hot at all — NTFS
+keeps its directory index by filename, so `read_dir` already returns sorted names and the sort of a
+real 116,734-entry folder measured **10 ms**.
+
+An earlier draft of this work claimed the sort was the dominant cost of opening a crowded folder.
+That number came from a synthetic fixture built by deliberately scrambling the names, and it
+described the fixture and nothing else.
+
+One deliberate behaviour difference: `str::to_lowercase` special-cases Greek final sigma and
+`char::to_lowercase` does not, so two names differing only there now compare **equal** where they did
+not before. Both callers then settle them on exact bytes, which is what keeps the order total and
+stable across two listings of the same folder.
+
+### The walk, taken one trip at a time
+
+A `readdir` reply carries at most 100 names on OpenSSH — `MAX_READDIR_NAMES`, whatever the packet
+size would allow — so the trip **count** is the server's to choose, and 1,057 of them was not
+negotiable. The only variable on this side was how many were in flight, and `read_names` awaited each
+reply before sending the next request.
+
+They go out in waves of `READDIR_WINDOW` = 32 now. Same folder, same server:
+
+```
+sftp 34 waves x32, 105844 names, 8.681s      (38x)
+```
+
+34 waves in 8.68 s is 255 ms a wave against a 316 ms round trip, so the wave barrier is costing
+nothing measurable. The `ponytail:` note names a sliding window as the upgrade and states the
+condition that would justify it — the measured time ceasing to match `trips / WINDOW × RTT` — which
+this does not meet.
+
+russh-sftp is what makes this safe: every request takes its id from an atomic, its reply is matched
+back through a `DashMap`, and no lock is held across the await. The directory cursor lives on the
+**server**, so each reply is simply the next block, and the order the blocks arrive in does not
+matter because the listing is sorted afterwards regardless.
+
+Three rules kept deliberately, each one a comment in `stream_names`:
+
+* **A real error fails the listing; only EOF ends it.** A folder shown short of what it holds, with
+  nothing on screen saying so, is worse than an error message.
+* **A wave is drained even after one reply says EOF.** The other 31 were sent before anyone knew, and
+  the ones carrying names carry real ones.
+* **A wave that lands no names at all stops the loop.** EOF is a MUST in
+  draft-ietf-secsh-filexfer-02 §6.7, so a server that never sends it spun the single-`readdir` loop
+  this replaces **forever**. That is the one prior behaviour not preserved, and it is preserved on
+  purpose in the other direction.
+
+The same serial-await bug lived a second time in the same file: `read_dirs` resolved each symlink
+with its own awaited `stat` to decide whether the tree can open it. Fifty symlinks in a folder was
+fifty round trips in series — sixteen seconds on this link to answer "which of these are folders". It
+collects the links first and resolves them in waves of the same window, so that folder costs two
+trips. No measurement is quoted for it because there is nothing to measure: it is N serial trips
+becoming N / WINDOW, by construction. Bounded by the window rather than spawned all at once on
+purpose — ten thousand symlinks would otherwise go on the wire in one breath.
+
+### One click was asking two questions
+
+Clicking a folder in the tree did both jobs at once: it opened the branch **and** pointed the files
+pane at the folder. Two listings of the same directory, from one click, so every navigation asked the
+server to walk it twice. On this folder that was two 1,057-trip walks contending with each other, and
+the pane's own rows landed at **19.1 s** where a single walk took 8.7.
+
+Both walks were already `tokio::spawn`ed and demonstrably concurrent — they finished 0.16 s apart
+after 334 s — so this was never a parallelism problem. Overlapping two walks harder cannot help when
+one link is the constraint. The fix is that one of them should not happen, and the two clicks are two
+questions:
+
+* the folder's **name** shows it in the files pane, without opening the branch and without moving the
+  shell (§19's rule, unchanged).
+* the disclosure **marker** opens or closes the branch, and leaves the files pane where it is.
+
+One click, one listing, either way. The marker gets a 14 px column (`MARKER_WIDTH`) rather than the
+width of the `>` it holds, because it is a button now and a glyph-sized target is one a pointer
+misses. It carries no right-press handler of its own, so a right click anywhere on the row still
+falls through to the row's context menu. And `toggle_node` used to select the row on the way past, so
+`RowClicked` selects explicitly now — the selection is the row's own answer to being clicked, not a
+side effect of opening it.
+
+### The bytes, and a default nobody had chosen
+
+With the trips pipelined the wait stopped being latency, so it was measured again as bandwidth:
+
+```
+34 waves, 106382 names, 19.7 MiB in 11.58s = 1.70 MiB/s
+```
+
+**19.7 MiB is the listing.** 11.6 s of the remaining wait was the bytes, which is a different bug
+from the one above and takes a different fix — no request window can help it. Two candidates were
+ruled out before the third was found: the readdir window (34 waves at 255 ms against a 316 ms trip,
+so not the barrier) and russh's **channel** window, which is 2 MiB by default where sustaining
+1.70 MiB/s at 316 ms needs about 0.54 MiB in flight.
+
+What was left is that russh's `COMPRESSION_ORDER` lists `NONE` **first** and cmote had never
+overridden `preferred`. Every connection cmote had ever made negotiated **no compression at all** —
+not a decision, a default. A directory listing is `ls -l`-shaped text, which is what deflate is for.
+
+The order is the decision, and the test pins all three positions:
+
+* **`zlib@openssh.com` first**, because it is the *delayed* variant — the server turns the compressor
+  on only after authentication succeeds, so nothing sent while authenticating is ever fed through it.
+* **RFC 4253's plain `zlib` second**, which starts immediately, for a server too old to know the
+  first.
+* **`NONE` still on the list, last.** Without it a server offering no compression would have nothing
+  in common with us and fail to negotiate at all.
+
+Every transfer on the connection benefits, not only listings.
+
+### 11.6 seconds that cannot be shortened, only made visible
+
+The bytes have a floor: 19.7 MiB at 1.70 MiB/s **is** 11.6 seconds, and the pane was showing nothing
+for all of it, because the listing was collected in full, sorted, then cut into batches. A wave of
+`readdir` replies is already a batch the pane can draw, and the first one lands after a single round
+trip. So the walk is a producer now, and each wave goes out as a `FilesChunk` as it lands, cut to
+`files::BATCH` on the way. `read_names` becomes the collecting wrapper for the one caller that cannot
+act on half an answer — the tree, which would show a branch as childless if it read half a listing.
+
+**The sort moved, from the server task to the model,** and it had to: batches no longer arrive in
+order. `Files::chunk` sorts the whole listing once, when the batch that says `done` arrives — one
+sort per listing, not one per batch — and the local backend, which still hands over a listing NTFS
+sorted for it, pays almost nothing, since `sort_by` on already-ordered input walks the runs it finds.
+
+Two consequences worth stating rather than discovering:
+
+* **rows appear in the server's order while the walk runs, and settle into display order when it
+  finishes.** That is one visible reshuffle at the end. The `ponytail:` note on `all_sftp` records
+  the alternative — a model that merges each wave into sorted position, so the list is ordered at
+  every instant and rows appear mid-list as it grows — and the condition for building it.
+* **a failure partway through now leaves the rows that did arrive on screen**, with the reason on the
+  notice line. `FilesFailed` still fires, so a short listing is never presented as a whole one; what
+  changed is that the user sees what was read instead of nothing.
+
+`stream_names` also stops walking when the receiver has gone — the pane has left the directory —
+rather than reading a hundred thousand names for nobody.
+
+### The question the protocol will not let us ask
+
+The tree wants "which of this folder's children are folders?", and **SFTP has no directories-only
+filter**: `readdir` returns what the directory holds and the filtering is ours. So the tree's
+folder-only listing was paying exactly the same 1,057 trips and the same 19.7 MiB as the pane's, to
+keep a handful of names. `find` makes the server do the filtering and answers in a few hundred bytes.
+
+But `find` is not simply better, and that is the whole design here. Measured on the same connection:
+
+```
+folder            walk (SFTP)   find (a channel of its own)
+/opt (3)             0.32 s      ~0.6-1.0 s
+.../trans (6)        0.36 s      ~0.6-1.0 s
+.../processed        11.6 s      ~1 s
+```
+
+The walk reuses the SFTP channel that is already open; `find` needs `Runner::attempt` to open a
+channel, exec and close, which is two or three round trips. **Asking the shell first would have made
+every ordinary tree click about twice as slow in order to speed up the rare crowded one.**
+
+So the choice is made by **watching** rather than guessing. The walk starts as before; if it is still
+going after `WALK_WAVES_BEFORE_FIND` waves, this is a folder the walk is the wrong tool for, and the
+question is asked the other way instead. A folder that finishes inside the budget — nearly all of
+them — pays nothing at all for this, and the waves read before the switch are not waste: they are the
+round trip the walk would have cost anyway. **Dropping the receiver** is what stops the walk;
+`stream_names` sees the send fail and winds down, closing the directory handle on the way, which
+`abort()` would have skipped.
+
+`find` is not trusted to exist. A non-zero exit — no `find` on this server, or `-L` meeting a symlink
+loop — falls back to finishing the walk, which is why `stdout` bailing on a non-zero exit matters: it
+is what tells "this server has no find" from "this folder holds no folders".
+
+Every flag is load-bearing, and the test asserts the command verbatim:
+
+```
+find -L <quoted> -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null
+```
+
+`-L` follows symlinks so a link whose target is a directory counts — the tree's rule, and the
+opposite of the pane's. `-mindepth 1` stops find reporting the folder as its own child. `-maxdepth 1`
+keeps it to one folder rather than a subtree. `-print0` because a name may contain a newline and NUL
+is the one byte it cannot.
+
+The path goes through `explorer::shell_quote`, the boundary `shellfs` already draws and already calls
+a security boundary — **not a new quoting scheme**. `Browse::Sftp` carries the account's `Runner`
+alongside the session to reach it; it is the same runner `fall_back` hands out and reads as the same
+account, so §46 still decides which account a listing reads as, exactly as before.
+
+### Prove-it
+
+Five probes, each one reverted:
+
+```
+only the FIRST lowercase char compared    → `İs` sorts before `iz` where `i̇s` sorts after it;
+                                            the two rows come out swapped and the test says so
+the branch fetch back in the name click   → "a name click lists only the pane and a marker click
+                                            only the tree" fails with the duplicate in the
+                                            message — [ListDir("/var"), ListFiles { .. }]
+NONE put back in front of the list        → "compression is preferred but never required and the
+                                            delayed one comes first", whole list in the message
+the sort dropped from `done`              → two tests, including the new one pinning that rows are
+                                            countable and drawable mid-walk while `loading` is true
+the path interpolated raw into `find`     → "find asks the server to filter and keeps only the
+                                            child names", unquoted command in the message
+```
+
+`the_toggle_hides_nothing_but_dot_names_and_never_shows_the_dot_links` asserted **arrival** order,
+which was the old contract; it asserts display order now (`...odd` leads, `.` sorting ahead of `h`).
+Its subject — everything listed is here except `.` and `..` — is unchanged.
+
+**Two of the changes have no probe, and they are exactly the two that need a live server:** the
+pipelined walk and the waved symlink stats. `read_names` and `stream_names` cannot be driven without
+one, which the tests beside them already say about the two remote answers. They are verified by the
+trip count and the wall clock on a real link, not by the suite — and that absence is the finding
+handed to the architecture pass below, not an oversight excused.
+
+### What is measured, and what is only reasoned
+
+Stated plainly because §165's lesson is that a closing summary is where the error hides: the
+comparator, the pipelined walk and the removed double walk are **measured on the real link** — 334.2
+s → 8.7 s, and 19.1 s → 8.7 s. Compression, the streamed rows and the adaptive `find` are **reasoned
+from measurements**, not yet timed end to end on it. Compression's payoff in particular depends
+entirely on how well that listing text deflates.
+
+### What to keep
+
+**Latency and bandwidth are two different bugs, and a fix for one does nothing for the other.**
+334 s was 1,057 serial trips at 316 ms. 11.6 s was 19.7 MiB at 1.70 MiB/s. The first is fixed by
+having more requests in flight and is completely indifferent to how many bytes come back; the second
+is fixed by sending fewer bytes and is completely indifferent to how many trips carry them. Measuring
+which one you have, before choosing, is the whole job — and the measurement that told them apart was
+counting the round trips *and* the bytes in the same run.
+
+**Measure the machine the user is on.** Everything measured before "over SSH with latency" was said
+out loud was measured against the local backend: 98 ms `read_dir`, 0 ns per `metadata`, 10 ms sort,
+192 ms end to end. All correct, all irrelevant, because development on localhost is **latency-blind**
+by construction. One sentence of context redirected the entire diagnosis.
+
+**A synthetic fixture answers the question you built it to answer.** Scrambling 116,734 names made
+the sort look like the dominant cost. NTFS returns directory entries already sorted by filename, so
+the real folder's sort was 10 ms and the fixture was measuring an input the app never sees. The
+comparator fix survived anyway — but for the remote listing, which genuinely does arrive shuffled,
+and the reason in the commit is now that one rather than the fixture's.
+
+**`metadata` being free is what killed the good-sounding plan.** The proposal on the table was to
+show a cheap `ls -la` listing first and enrich it later. There is no cheap-then-rich split to make:
+`DirEntry::metadata` measured 0–100 ns for 116,734 real entries because Windows ships the data with
+the enumeration, and SFTP likewise puts the attributes in the same packet as the name. Over a
+latency-bound link the *substance* of the idea was right — the cost is round trips, and one `ls` is
+one — and pipelining reached the same place without giving up the typed listing.
+
+**A default is a decision nobody took.** cmote had shipped every connection with compression off,
+not because it was weighed and refused but because `COMPRESSION_ORDER` puts `NONE` first and
+`preferred` was never overridden. This document prices features it refuses; a library default that
+silently answers a question on cmote's behalf is worth the same scrutiny, and it took a bandwidth
+measurement to notice one had.
+
+**A fix that helps the rare case at the common case's expense is a regression wearing a measurement.**
+`find` looked strictly better until `attempt`'s channel cost was measured, at which point
+unconditional `find` would have doubled the cost of every ordinary tree click. Watching rather than
+guessing — start the cheap thing, switch when it proves wrong — is what let both cases keep their own
+answer, and it needs no configuration and no per-server probe.
+
+**The seam that does not exist is the finding.** Two of these changes are round-trip-count changes,
+and nothing in a 1,810-test suite can observe a round-trip count. A folder walk could silently
+regress from 34 trips to 1,057 and stay green. That is not "untestable code" — it is a missing seam,
+recorded here and handed to §168.
