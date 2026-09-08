@@ -19283,8 +19283,15 @@ roughly **1.9 million of them**, to show the sixty a window holds.
 rows of slack at each end, between a spacer for everything above and a spacer for everything below.
 The spacers are what make this invisible from outside: they hold the scrollable's extent open, so the
 scrollbar's size and travel — and `row_top`, which the details popup and the rubber band are placed
-by — are exactly what they were when every cell existed. Nothing downstream had to learn that the
-cells are no longer all there.
+by — are what they were when every cell existed. Nothing downstream had to learn that the cells are
+no longer all there.
+
+To 4 px, which §168's review found this sentence rounding off. Every stripe is a whole `pitch` tall
+*including the last*, where `Row::wrap` put `CELL_SPACING` only between rows, so the extent gained
+one trailing gap and the scrollbar can travel it. The uniform pitch is what `row_top` and
+`band_hits` do arithmetic on; a final row of its own height would be an exception both would have to
+carry forever, so the 4 px is the cheaper of the two — but "exactly what they were" was a claim, and
+it was 4 px wrong.
 
 **Making the wrap explicit costs this view the one thing it got for free, and pays for it twice
 over.** `Row::wrap` followed the window's width without being told the column count; spelling the

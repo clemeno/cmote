@@ -562,7 +562,15 @@ const OVERSCAN: usize = 2;
 ///
 /// So the rows are laid out explicitly instead: a spacer for everything scrolled off the top, the
 /// visible rows, a spacer for the rest. The spacers keep the scrollable's extent — and therefore the
-/// scrollbar and `row_top` — exactly what they were when every cell was built.
+/// scrollbar and `row_top` — what they were when every cell was built, so nothing downstream had to
+/// learn that the cells are no longer all there.
+///
+/// To one row's worth of trailing gap, which is the honest version of that sentence (§168). Every
+/// stripe is a whole `pitch` tall INCLUDING the last, where the wrap put `CELL_SPACING` only
+/// *between* rows — so the extent is 4 px taller than it used to be, and the scrollbar can travel
+/// those 4 px past the final row. The uniform pitch is what `row_top` and `band_hits` are arithmetic
+/// on, and a last row of its own height would be the one exception both would have to carry, so the
+/// 4 px is the cheaper of the two.
 ///
 /// Making the wrap explicit costs this view the one thing it used to get for free (the column count
 /// follows the window without being told), and pays for it twice over: `columns(width)` was ALREADY
@@ -582,8 +590,8 @@ fn entry_grid<'a>(files: &'a Files, entries: &[&Entry], width: f32) -> Element<'
 		stripes.push(spacer(super::pixels(built.start, pitch)));
 	}
 	for index in built.clone() {
-		let band = &entries[index * columns..((index + 1) * columns).min(entries.len())];
-		let cells = band
+		let stripe = &entries[index * columns..((index + 1) * columns).min(entries.len())];
+		let cells = stripe
 			.iter()
 			.map(|entry| cell(entry, directory, files, editing));
 		// Each stripe is a whole pitch tall with its cells at the top, so the gap below a row is
