@@ -188,10 +188,6 @@ async fn exec_inline(
 	collect(&mut channel).await
 }
 
-/// Who a file operation runs as, and how to make that happen — cloneable, so it can be moved into
-/// the spawned task that does the work.
-///
-/// The login account's runner is the plain one: it wraps nothing, so every command is exactly what
 /// Running one shell snippet on the remote and hearing what it said (§46).
 ///
 /// Three questions, which is all the shell backend's directory listings, metadata reads and
@@ -243,6 +239,10 @@ impl Exec for Runner {
 	}
 }
 
+/// Who a file operation runs as, and how to make that happen — cloneable, so it can be moved into
+/// the spawned task that does the work.
+///
+/// The login account's runner is the plain one: it wraps nothing, so every command is exactly what
 /// cmote has always sent. An elevated runner carries the account, the kind of elevation, and the
 /// password to authenticate it with when sudo asks for one.
 #[derive(Clone)]
