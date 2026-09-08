@@ -1540,6 +1540,43 @@ mod walk_tests {
 			"every file in the tree, and only the files"
 		);
 	}
+
+	/// The link rule again, one level down — and by a different route, which is why it is a second
+	/// test and not the same one. At the root, `remove_tree` asks `lstat`; inside the tree there is
+	/// no asking at all, because the listing already said what each name is and a link's own type is
+	/// a link. So it is unlinked with the files.
+	///
+	/// The regression to fear is a copy: `keep_dirs`, in this same module, resolves every listed
+	/// link ON PURPOSE, because a link to a folder is a branch of the tree pane (§19). Reading a
+	/// link as a folder is right there and right for that job — and here it would empty someone
+	/// else's folder.
+	#[tokio::test]
+	async fn a_link_inside_the_tree_is_unlinked_with_the_files_and_never_followed() {
+		let steps = Arc::new(Steps::tree(&[(
+			"/p",
+			&[link_file("to_elsewhere"), plain_file("mine.txt")],
+		)]));
+
+		remove_subtree(&steps, "/p").await.expect("the folder went");
+
+		let mut unlinked = steps.arguments("remove");
+		unlinked.sort();
+		assert_eq!(
+			unlinked,
+			vec!["/p/mine.txt".to_owned(), "/p/to_elsewhere".to_owned()],
+			"the link went the way the file did — as one name"
+		);
+		assert_eq!(
+			steps.counted("opendir"),
+			1,
+			"the folder was read, and the link was not read at all"
+		);
+		assert_eq!(
+			steps.arguments("rmdir"),
+			vec!["/p".to_owned()],
+			"one folder was here to remove, whatever the link points at"
+		);
+	}
 }
 
 #[cfg(test)]
