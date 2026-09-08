@@ -1037,10 +1037,18 @@ impl Files {
 
 	/// The listing failed (no permission, gone, the server refused). Stale failures are
 	/// dropped the same way stale batches are.
+	///
+	/// A failure ENDS a listing, so it sorts what arrived for the same reason `chunk` sorts at
+	/// `done` (§168). Since §167 the rows a streamed listing had already delivered stay on screen
+	/// with the reason on the notice line — and this is the one ending that is not `done`, so
+	/// without the sort those rows kept the server's own order (hash order, on ext4) for as long as
+	/// the user stayed in the folder. Nothing else would ever put them right: `rows` reorders only
+	/// if a column has been picked.
 	pub fn failed(&mut self, request: u64, reason: String) {
 		if request != self.request {
 			return;
 		}
+		sort(&mut self.entries);
 		self.loading = false;
 		self.notice = Some(reason);
 	}
@@ -1749,6 +1757,36 @@ mod tests {
 		files.chunk(request, vec![entry("mango", FilesKind::Dir)], true);
 		assert!(!files.loading(), "the walk is done");
 		assert_eq!(names(&files), ["mango", "apple", "zebra"]);
+	}
+
+	/// The other way a streamed listing can end (§168). A failure partway through keeps the rows
+	/// that did arrive — that is §167's own choice, since the user seeing what was read beats
+	/// seeing nothing — and they are an ENDING too, so they get the same one sort. Without it they
+	/// would keep the server's order for as long as the folder stayed open, because the only other
+	/// thing that reorders them is a column the user picked.
+	#[test]
+	fn rows_left_by_a_failed_listing_are_still_put_in_order() {
+		let mut files = Files::default();
+		let request = files.show("/home").expect("a new directory needs listing");
+
+		files.chunk(
+			request,
+			vec![
+				entry("zebra", FilesKind::File),
+				entry("apple", FilesKind::File),
+				entry("mango", FilesKind::Dir),
+			],
+			false,
+		);
+		files.failed(request, "the server refused halfway".to_owned());
+
+		assert!(!files.loading(), "a failure ends the listing");
+		assert_eq!(
+			names(&files),
+			["mango", "apple", "zebra"],
+			"what arrived is in display order, not the order the server happened to send"
+		);
+		assert!(files.notice().is_some(), "and the reason is on the pane");
 	}
 
 	#[test]
