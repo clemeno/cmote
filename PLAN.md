@@ -1372,11 +1372,23 @@ report-all, associated text), superseding modifyOtherKeys when an editor enables
   in `.github/workflows/`: a bare `MAJOR.MINOR.PATCH` tag (the repo's convention — `2.3.0`,
   not `v2.3.0`) builds the optimized binary on both targets, packages each the platform way
   — a portable `cmote.exe`, a zipped Finder-launchable `cmote.app` (`bundle-macos.sh`, whose
-  `BIN` the workflow overrides at the cross-compiled Intel binary since the runner is Apple
-  Silicon) — checksums them into `SHA256SUMS`, and attaches the lot to a **draft** GitHub
-  Release for a human to review and publish. A manual `workflow_dispatch` run builds both
-  targets *without* publishing, to exercise the pipeline before cutting a tag. The publish
-  job is the only one granted `contents: write`; the builds stay read-only.
+  `BIN` the workflow points at the `lipo`-fused UNIVERSAL binary since §127; its `APP` default
+  is independent of `BIN`, which is what keeps the `ditto` path right) — checksums them into
+  `SHA256SUMS`, and attaches the lot to a **draft** GitHub Release for a human to review and
+  publish. A manual `workflow_dispatch` run builds both targets *without* publishing, to
+  exercise the pipeline before cutting a tag. The publish job is the only one granted
+  `contents: write`; the builds stay read-only.
+  - **The tag is checked against the manifest first (§171).** The file names come from the tag
+    and the version *inside* both artifacts comes from `Cargo.toml` — `bundle-macos.sh` seds
+    `CFBundleVersion` out of it — so a tag the tree does not agree with ships files labelled one
+    version and reporting another, which is not something a draft review shows. A 15-second job
+    the builds depend on, skipped on a dry run where no version is being claimed.
+  - **The release body says how to verify (§171).** `generate_release_notes` pre-pends a written
+    body to GitHub's commit-range notes, and for this release those notes are 375 commit titles —
+    so the body leads with a link to `CHANGELOG.md` and the `SHA256SUMS` check. That check being
+    "THE integrity check, not a stand-in for one" was written in the workflow's own header and
+    nowhere the person downloading it would read; the body also says the SmartScreen and Gatekeeper
+    warnings are expected and permanent, so they do not read as a bad download.
 - **Code signing + auto-update** — **decided: NO, not deferred.** This used to read "still
   deferred", which kept it on every remaining-work list as a thing about to happen. It is not:
   cmote will not be Authenticode-signed, `codesign`ed or notarized, and there will be no update
@@ -20159,6 +20171,39 @@ notice rather than by section order, with the section number on every line, and 
 it is a summary and not the record. The range is exact rather than estimated: PLAN.md at the 3.0.0
 tag ended at section 30, so §31–§170 is this release. 1.x–3.0.0 predate the file and are pointed at
 PLAN.md rather than reconstructed from tags.
+
+### And the workflow that ships it
+
+The markers were read; the pipeline that publishes them had not been. Two gaps, both about the
+release being a thing a stranger receives rather than a build that succeeds.
+
+**Nothing checked the tag against the manifest.** The artifact NAMES come from the tag
+(`cmote-4.0.0-x86_64-pc-windows-msvc.exe`) and the version *inside* them comes from the tree —
+`bundle-macos.sh` seds `CFBundleVersion` straight out of `Cargo.toml`. So a tag one commit early, or
+a version bump forgotten, ships files labelled one version and reporting another. Nothing in
+reviewing a draft would show it: the names all agree with each other and with the release title,
+because they all came from the same tag. Now a 15-second job the builds depend on, and skipped on a
+dry run where no version is being claimed.
+
+**The release page said nothing to the person downloading it.** `generate_release_notes: true` and
+no body — which for this release means the body is 375 commit titles. And the one thing a reader of
+that page needs was written in the *workflow's own header comment*, where nobody but a maintainer
+will ever see it: that the binaries are unsigned by decision, and that `SHA256SUMS` is therefore the
+integrity check rather than a stand-in for one. The generated notes pre-pend a written body, so the
+two compose: `CHANGELOG.md` and the verification commands first, the full commit list under them.
+It also says the SmartScreen and Gatekeeper warnings are expected and permanent — an unsigned binary
+looks exactly like a bad download unless something says otherwise.
+
+**One more staleness, found by reading §16 against the file.** §16 described the bundler's `BIN`
+being pointed at "the cross-compiled Intel binary", which was true before §127 made the bundle
+universal; the workflow points it at the `lipo`-fused binary. And the thing that could have been
+fragile is not: `bundle-macos.sh` defaults `APP` independently of `BIN`, so overriding the binary
+does not move the `.app`, which is what keeps the workflow's `ditto` path correct.
+
+Neither workflow can be run from here, so both were parsed and the guard's shell logic exercised
+both ways — matching tag passes, mismatched tag fails. That is not the same as a green run, and the
+rehearsal (`workflow_dispatch`, which builds both targets and publishes nothing) is still worth
+doing before the tag.
 
 ### What to keep
 

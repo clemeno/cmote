@@ -35,12 +35,39 @@ permissions:
   contents: read
 
 jobs:
+  # ── The tag and the manifest have to agree (§171) ──────────────────────────
+  # A tag is the only thing that NAMES a release; `Cargo.toml` is the only thing the
+  # artifacts themselves carry — the file names come from the tag, while the version
+  # inside the exe and the bundle's `CFBundleVersion` (`bundle-macos.sh` seds it out of
+  # the manifest) come from the tree. Tag `4.0.1` on a tree that still says `4.0.0` and
+  # every file is labelled one version while reporting another, with nothing a human
+  # reviewing the draft would see.
+  #
+  # So it is checked first and the builds wait for it: one runner start against finding
+  # out ten minutes later, or not at all. Skipped on a manual dry run, where the ref is a
+  # branch and there is no version being claimed.
+  version:
+    name: tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compare the tag with the package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          manifest="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$manifest" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml $manifest" >&2
+            exit 1
+          fi
+          echo "tag and manifest agree: $manifest"
+
   # ── Windows portable exe ──────────────────────────────────────────────────
   # windows-latest is our native `x86_64-pc-windows-msvc` target, so a plain
   # release build writes `target/release/cmote.exe` — the portable binary that
   # ships as-is (no installer, no bundle).
   windows:
     name: build (x86_64-pc-windows-msvc)
+    needs: [version]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -76,6 +103,7 @@ jobs:
   # size, which for a portable app measured in single-digit megabytes is nothing.
   macos:
     name: build (universal-apple-darwin)
+    needs: [version]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
@@ -145,7 +173,33 @@ jobs:
           # nothing goes public automatically and a bad tag can be redone silently.
           draft: true
           name: cmote ${{ github.ref_name }}
-          generate_release_notes: true
+          # `generate_release_notes` PRE-PENDS this body to the notes GitHub builds from
+          # the commit range, so the two compose: the essentials first, the full commit
+          # list under them for whoever wants it. That list is long — 4.0.0 is 375 commits
+          # — which is exactly why the summary has to lead, and `CHANGELOG.md` is the
+          # summary rather than a second one written here.
+          #
+          # The verification lines are not boilerplate. This workflow's header says
+          # `SHA256SUMS` is THE integrity check and not a stand-in for one, and the release
+          # page is the only place the person downloading it ever reads. Saying that the
+          # warning is expected and permanent is what stops it reading as a bad download.
+          body: |
+            **[What changed in this release](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md)** · [design record](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/PLAN.md)
+
+            Portable: one `cmote.exe` on Windows, one `cmote.app` on macOS (universal — Intel and Apple Silicon in the same bundle). No installer, nothing written outside the folder you put it in.
+
+            ### Verifying your download
+
+            These binaries are **not** code-signed or notarized, and will not be — that is a decision, not something pending (PLAN §16). So `SHA256SUMS` is the integrity check:
+
+            ```sh
+            sha256sum -c SHA256SUMS          # Linux, macOS, Git Bash
+            ```
+            ```powershell
+            Get-FileHash .\cmote-*.exe -Algorithm SHA256   # then compare with SHA256SUMS
+            ```
+
+            Windows SmartScreen and macOS Gatekeeper will warn about a fresh download and will keep warning. That is expected, it is what an unsigned binary looks like, and it is not a sign that the file is wrong — the checksum is.
           fail_on_unmatched_files: true
           files: |
             dist/cmote-*
