@@ -12,5 +12,12 @@
 # host keys or any per-user data.
 /cmote-data/
 
+# Where `release.yml` stages the named artifacts before uploading them, and therefore
+# where a LOCAL rehearsal of that workflow puts an 18 MB exe (§171). Ignored because the
+# staging step is `mkdir -p dist` and the commit habit here is `git add -A`: without this
+# line, one rehearsal followed by one commit puts a release binary in the history for
+# good. The artifacts are built from a tag, never committed.
+/dist/
+
 # Note: Cargo.lock IS committed (this is a binary crate) for reproducible,
 # auditable builds — see PLAN §12.

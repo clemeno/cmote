@@ -1378,11 +1378,14 @@ report-all, associated text), superseding modifyOtherKeys when an editor enables
   publish. A manual `workflow_dispatch` run builds both targets *without* publishing, to
   exercise the pipeline before cutting a tag. The publish job is the only one granted
   `contents: write`; the builds stay read-only.
-  - **The tag is checked against the manifest first (§171).** The file names come from the tag
-    and the version *inside* both artifacts comes from `Cargo.toml` — `bundle-macos.sh` seds
-    `CFBundleVersion` out of it — so a tag the tree does not agree with ships files labelled one
-    version and reporting another, which is not something a draft review shows. A 15-second job
-    the builds depend on, skipped on a dry run where no version is being claimed.
+  - **The tag is checked against the manifest first (§171).** The file names come from the tag and
+    the version *inside* both artifacts comes from `Cargo.toml`, by two different roads: the binary
+    answers `XTVERSION` with `cmote(<CARGO_PKG_VERSION>)`, stamped in at compile time so the reply
+    "never drifts from the binary" (§33), and `bundle-macos.sh` seds `CFBundleVersion` out of the
+    manifest. So a tag the tree does not agree with ships files labelled one version while the
+    program *tells a remote* it is another — and a draft review shows none of it, every name having
+    come from the same tag. A 15-second job the builds depend on, skipped on a dry run where no
+    version is being claimed.
   - **The release body says how to verify (§171).** `generate_release_notes` pre-pends a written
     body to GitHub's commit-range notes, and for this release those notes are 375 commit titles —
     so the body leads with a link to `CHANGELOG.md` and the `SHA256SUMS` check. That check being
@@ -20204,6 +20207,51 @@ Neither workflow can be run from here, so both were parsed and the guard's shell
 both ways — matching tag passes, mismatched tag fails. That is not the same as a green run, and the
 rehearsal (`workflow_dispatch`, which builds both targets and publishes nothing) is still worth
 doing before the tag.
+
+### The rehearsal, as far as one machine goes
+
+`workflow_dispatch` could not be fired from here — no `gh` on the machine, and the API wants a token
+that has no business in this loop. But the **Windows half of the pipeline is the local build**, so
+it was run step for step, with `GITHUB_REF_NAME=4.0.0` standing in for the tag.
+
+* `cargo metadata --locked` passes, so `--locked` will not fail the release on a stale lockfile.
+* `cargo build --release --locked` — **4m 37s, exit 0**, a 17.2 MB `cmote.exe`.
+* The staging `cp` produces `cmote-4.0.0-x86_64-pc-windows-msvc.exe`, and
+  `(cd dist && sha256sum cmote-* > SHA256SUMS)` writes one line and — the thing the glob is there
+  for — does not hash the sums file itself.
+
+**And the check on the binary's own version failed, for a reason worth keeping.** Grepping the exe
+for `cmote(4.0.0)` finds nothing, while `cmote(` is present once and `4.0.0` twice. The reply is
+there; it is not a string. With `lto = true`, `opt-level = 3` and `codegen-units = 1`, the whole
+XTVERSION answer is assembled from **immediate operands in the instruction stream**:
+
+```text
+\x1bP>|            DCS > |            written as an imm32
+H\xb8 cmote(4.     mov rax, imm64     the first eight bytes
+\xc7F\x0c 0.0)     mov dword, imm32   the next four
+f\xc7F\x10 \x1b\\  mov word, imm16    ST
+```
+
+So `cmote(4.0.0)` never exists contiguously in `.rdata` at all. Two things follow. The claim the
+version gate rests on is **confirmed** — the manifest's version is compiled into the binary and is
+what a remote is told. And **a string grep over an optimised binary is not a test**: it can only
+fail to find things that are provably there, which is the worst kind of check, since a green one
+means nothing either.
+
+**One real hazard, found by doing it rather than reading it.** `dist/` was not in `.gitignore`. The
+staging step is `mkdir -p dist`, the commit habit in this tree is `git add -A`, and the artifact is
+18 MB — so one local rehearsal followed by one ordinary commit puts a release binary in the history
+permanently. Ignored now, with the reasoning in the file so it does not get tidied away as unused.
+
+**And a stale fixture on the way past.** `query.rs`'s framing test fed `cmote(3.1.0)` — a version
+§16 records as work in progress that was never tagged. The value is deliberately arbitrary there,
+the framing being what is under test, so it now reads `cmote(0.0.0-fixture)`: a version that cannot
+be mistaken for cmote's, since a plausible one invites the reader to think the fixture tracks
+`VERSION` — which it must not, or the test would be asserting `concat!` against itself.
+
+What remains unrehearsed is the macOS job — two cross-compiles, `lipo`, the bundle and `ditto` — and
+the publish job, which is tag-only by design. Those need the dispatch run on GitHub, and it is still
+worth doing before the tag.
 
 ### What to keep
 

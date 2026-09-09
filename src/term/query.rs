@@ -873,10 +873,14 @@ mod tests {
 
 	#[test]
 	fn the_version_reply_frames_the_identity() {
-		// `DCS > | <id> ST` around the identity string.
+		// `DCS > | <id> ST` around the identity string. The id is deliberately a version that is
+		// not and never will be cmote's: what is under test is the FRAMING, and a fixture carrying
+		// a plausible version reads as though it tracked `VERSION` — which it must not, or the test
+		// would be asserting `concat!` against itself. (It read `cmote(3.1.0)` until §171, a version
+		// §16 records as work in progress that was never tagged.)
 		assert_eq!(
-			version_reply("cmote(3.1.0)"),
-			b"\x1bP>|cmote(3.1.0)\x1b\\".to_vec()
+			version_reply("cmote(0.0.0-fixture)"),
+			b"\x1bP>|cmote(0.0.0-fixture)\x1b\\".to_vec()
 		);
 	}
 
