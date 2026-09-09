@@ -20253,9 +20253,37 @@ What remains unrehearsed is the macOS job — two cross-compiles, `lipo`, the bu
 the publish job, which is tag-only by design. Those need the dispatch run on GitHub, and it is still
 worth doing before the tag.
 
+### The supply chain, which CI checks and nobody had read
+
+`cargo deny` and `cargo audit` are CI's third job and both tools were already installed here, so
+they were run — and the interesting part is that **`cargo audit` reports more than it fails on**.
+CI ignores three advisories by id and exits 0, which is correct; the warnings printed alongside are
+not part of that verdict and nobody was reading them. Two were **yanked versions**, both in the
+crypto path: `chacha20 0.10.1`, reached through `rand` and `ssh-cipher`, and `wnaf 0.14.0`, reached
+through `p256`/`p384` and so through russh's ECDSA key auth.
+
+Yanked is not an advisory. It says the authors withdrew that exact version and does not say why —
+an unknown worth carrying only if it buys something, and here it bought nothing: both had a patch
+release waiting. Bumped those two and nothing else, because a plain `cargo update` would have moved
+40 packages on the eve of a tag and this is 8 lines of `Cargo.lock`. Re-verified after: `deny` ok,
+`audit` exits 0 with the yanked pair gone, the suite green, and `cargo build --release --locked`
+clean in 4m 58s — the release build being the thing a lock change actually decides.
+
+Two advisories stay, both decided rather than new. `rsa` RUSTSEC-2023-0071, the Marvin timing
+side-channel, has no upstream fix and arrives with russh's RSA auth (§12). And `lru`
+RUSTSEC-2026-0253 is *unsound* — a potential use-after-free in `LruCache::pop()` — with no fix
+available; it is iced's glyph cache via `cryoglyph`, cmote never calls it, and reaching the
+unsoundness needs a panic mid-`pop`. Left, and now written down rather than merely unnoticed.
+
 ### What to keep
 
-**The check nobody runs is the one that rots.** Not the check that fails and gets ignored — that one
+**The check nobody runs is the one that rots.**
+
+**A check that PASSES can still be unread.** `cargo audit` exits 0 for cmote and prints six
+warnings while doing it, two of which were yanked crypto crates. The green tick is about the ignore
+list, not about the output — so "CI is green" and "somebody looked" are different claims, and only
+the first was true here.
+ Not the check that fails and gets ignored — that one
 is visible. `cargo doc` was never in the gate, so eighteen errors accumulated with every commit
 passing five green commands. Worth asking, of any project: which build is not in the gate? The
 answer is where the rot is.
