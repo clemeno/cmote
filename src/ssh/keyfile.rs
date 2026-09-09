@@ -116,10 +116,26 @@ fn ppk_is_encrypted(text: &str) -> bool {
 /// was missing or wrong (the MAC won't verify) → recoverable, ask again. A
 /// failure on an unencrypted file is a real, hard error.
 ///
-/// `ponytail:` `from_ppk` takes the passphrase as an owned `String` by value, so
-/// we must copy it out of `Secret` for the call. That copy is a plain `String`
-/// dropped inside the crate — not zeroized — a small secret-hygiene gap the
-/// crate's API forces on us (§12). Acceptable for now; noted honestly.
+/// `ponytail:` `from_ppk` takes the passphrase as an owned `String` **by value**
+/// (`ssh-key` 0.7.0-rc.11: `from_ppk(ppk: impl AsRef<str>, passphrase: Option<String>)`),
+/// so a copy has to be made out of `Secret` for the call. That copy is a plain `String`
+/// dropped inside the crate without being zeroized — the one documented exception to §12's
+/// rule that a secret lives only in `Secret` or `Zeroizing`.
+///
+/// **The size of it, stated rather than waved at.** Exactly one copy, not two: `Secret::expose`
+/// hands out a `&str` and this is the only `to_owned` on the path, so the unzeroized copy is the
+/// crate's and its life is the length of one `from_ppk` call. Nothing outside `ssh-key` can zero
+/// it — the value is moved in — so this is not a shortcut with a cheaper version available.
+///
+/// **The trigger is upstream, not here.** The pinned version is a release candidate; if `from_ppk`
+/// ever takes `&str` or a `Zeroizing<String>`, the copy disappears at the call site and this note
+/// goes with it. Worth re-reading the signature when `ssh-key` 0.7.0 lands final.
+///
+/// One thing this note does NOT claim to fix, so it is said here rather than implied away: an
+/// *unencrypted* key file's plaintext also sits in the plain `String` that `load_private_key`
+/// read it into (both decoders share that read). A key stored unencrypted is already plaintext on
+/// disk, so RAM hygiene is not what protects it — the passphrase above is a different case,
+/// because it was typed and never written down.
 fn load_ppk(text: &str, passphrase: Option<&str>) -> Result<Loaded> {
 	match PrivateKey::from_ppk(text, passphrase.map(str::to_owned)) {
 		Ok(key) => Ok(Loaded::Key(Box::new(key))),
