@@ -103,9 +103,15 @@ impl IntegrationShell {
 /// `ponytail:` no **OSC 133;C** (the mark that says a command has started running). bash can only
 /// report that through a global `DEBUG` trap, which is a single slot every preexec framework wants
 /// and which cmote would be silently taking over. The cost of leaving it out is bounded and known:
-/// the tab's status dot never shows "running", and Ctrl+Shift+O finds no output span to select,
-/// because a command whose output never started is filed as an empty range (`term::osc133`). Ticks,
-/// jumps and the ✓/✗ all work. zsh has proper hooks and gets the mark.
+/// the tab's status dot never shows its amber "running" colour, and Ctrl+Shift+O finds no output
+/// span to select, because a command whose output never started is filed as an empty range
+/// (`term::osc133`). Ticks, jumps and the dot's green/red still work — pinned by
+/// `term::tests::the_cycle_a_real_bash_sends_still_reports_the_exit_code`, because this block sends
+/// `D` and then `A` with no `C` between them and that is nothing like the textbook cycle. zsh has
+/// proper hooks and gets the mark.
+///
+/// The dot is a DOT. An earlier version of this note said "the ✓/✗", and no such glyph has ever
+/// been drawn — §170 found it by a user going to look for one.
 ///
 /// `ponytail:` the path in the URI is not percent-encoded. Encoding it in portable shell is a
 /// per-character loop on every prompt, and cmote's own reader takes a raw path fine; the case it

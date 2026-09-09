@@ -277,8 +277,9 @@ fn parse(payload: &[u8]) -> Option<Mark> {
 }
 
 /// Where the command cycle stands right now (§34), derived from the marks as they arrive. Drives
-/// the per-tab status glyph: a running command shows a dot, and a finished one a ✓ or a ✗ with its
-/// code (`last_exit`).
+/// the per-tab status DOT and nothing else: amber while a command runs, then green or red from
+/// `last_exit` (`ui::tabs::TabStatus`). One dot, three colours — no glyph and no number, so the
+/// exit code decides a colour and is never shown.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CommandState {
 	/// At rest — before the first prompt, or after a command finished and its result was read.

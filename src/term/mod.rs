@@ -4916,6 +4916,38 @@ mod tests {
 		assert_eq!(terminal.last_exit(), Some(0));
 	}
 
+	/// The cycle a REAL bash sends, which is not the textbook one above (§170).
+	///
+	/// cmote's own installed block emits `D` and then `A` in a single write, and never emits `C` at
+	/// all — bash can only report a command's start through the global `DEBUG` trap, and
+	/// `crate::integration` refuses to take that slot (§17). So the marks arrive in the opposite
+	/// order to the test above with one of the four missing, and the exit code still has to reach the
+	/// tab's status dot. Every install cmote performs on a bash account depends on this.
+	#[test]
+	fn the_cycle_a_real_bash_sends_still_reports_the_exit_code() {
+		let mut terminal = Terminal::new(10, 40);
+
+		// The first prompt after login. The block runs before any command has been typed, so it
+		// reports the shell's own `$?` and opens the prompt — three OSCs in one write, as captured
+		// from bash 5.2.37 (§170).
+		terminal.process(b"\x1b]133;D;0\x07\x1b]7;file://host/home/rocky\x07\x1b]133;A\x07");
+		terminal.process(b"[rocky@rec ~]$ ");
+		assert_eq!(terminal.command_state(), osc133::CommandState::Prompt);
+		assert_eq!(terminal.cwd(), Some("/home/rocky"));
+
+		// `false` at that prompt. No `C` ever arrives, so the state never passes through `Running` —
+		// the cost the block accepts knowingly — and the code rides in on the NEXT prompt's `D`.
+		terminal.process(b"false\r\n");
+		terminal.process(b"\x1b]133;D;1\x07\x1b]7;file://host/home/rocky\x07\x1b]133;A\x07");
+		assert_eq!(
+			terminal.last_exit(),
+			Some(1),
+			"the failure reaches the tab's dot, which is what turns it red"
+		);
+		// The prompt that arrived in the same write is where the state ends up, not the `D` before it.
+		assert_eq!(terminal.command_state(), osc133::CommandState::Prompt);
+	}
+
 	#[test]
 	fn a_prompt_is_anchored_to_the_line_the_cursor_is_on() {
 		// The split-advance is the whole point: the prompt mark must land on the line the cursor
