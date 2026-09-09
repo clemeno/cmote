@@ -21,7 +21,8 @@ This is a **learning project**. The code is meant to be read as much as run, so 
 written didactically: it favours idiomatic Rust, explains *why* each choice was made,
 and marks every deliberate shortcut with a `ponytail:` note so "simple" reads as
 intent, not oversight. The full design rationale lives in [PLAN.md](PLAN.md); section
-references below (§n) point into it.
+references below (§n) point into it. [CHANGELOG.md](CHANGELOG.md) is the short version — what
+changed between releases, with the section number for each line.
 
 ## Features
 
