@@ -18,17 +18,27 @@ most surprising lines are surprising on purpose and the section says why.
 
 ## The green gate
 
-Before **any** commit, all five, in this order:
+Before **any** commit, all six, in this order:
 
 ```
 rustup update stable
 cargo check --all-targets
 cargo test
 cargo clippy --all-targets -- -D warnings
+cargo doc --no-deps
 cargo fmt --check
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same three that apply to it, plus `cargo deny` and
+**`cargo doc` is the sixth because it was missing (§171).** The docs are a build, and the other
+five all pass with them broken — so eighteen errors accumulated where nobody was looking: six
+intra-doc links to a **private** module (`csi::Framer`, which could never have resolved), four to
+`pub(super)` items rustdoc does not document, six comments whose `<span>`, `<pre>` and
+`Ctrl+<char>` were parsed as HTML, and one sentence that named a trait method that does not exist.
+`[lints.rust] warnings = "deny"` reaches rustdoc too, so all of them are errors rather than
+warnings; nothing was ignoring them, nothing was asking. `--no-deps` because a dependency's own
+docs are not ours to fix.
+
+CI (`.github/workflows/ci.yml`) runs the same four that apply to it, plus `cargo deny` and
 `cargo audit` for the dependency tree, and repeats both on the mac — but not on one target.
 **Clippy is cross-compiled to `x86_64-apple-darwin` and the tests run natively on the aarch64
 runner**, which between them compile both slices of the universal bundle (§127). There is

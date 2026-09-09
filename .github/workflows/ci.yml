@@ -61,6 +61,16 @@ jobs:
       # minutes testing a commit nobody is waiting on.
       - run: cargo test
         if: ${{ !cancelled() }}
+      # The docs are a build too, and one nothing else covers (§171). `[lints.rust]
+      # warnings = "deny"` reaches rustdoc as well, so a broken intra-doc link or an
+      # unclosed HTML tag in a comment is an ERROR here — which is how eighteen of them
+      # accumulated unseen: `check`, `clippy`, `test` and `fmt` all pass with the docs
+      # broken. `--no-deps` because a dependency's own docs are not ours to fix.
+      #
+      # Same one-target blind spot clippy has: a `#[cfg(target_os = "macos")]` item's
+      # doc comment is not compiled here, so a broken link inside one still lands green.
+      - run: cargo doc --no-deps
+        if: ${{ !cancelled() }}
 
   # ── macOS (the second target) ─────────────────────────────────────────────
   # GitHub's macOS runners are Apple Silicon (aarch64), and since §127 cmote ships
