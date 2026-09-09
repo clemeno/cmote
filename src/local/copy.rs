@@ -25,6 +25,13 @@
 //     means `SetFileTime` on Windows and `futimens` on macOS — two more platform calls for a cosmetic
 //     property. A local copy therefore lands stamped "now", the same as one made with Explorer's
 //     copy-paste or `cp` without `-p`.
+//
+//     Two things about it worth having written down, since it is an inconsistency between paths a
+//     user picks between freely rather than a missing feature. **`SetFileTime` alone would make it
+//     worse**: local copies would then preserve the time on Windows and not on macOS, which is a
+//     harder thing to explain than "no local copy preserves it". And the macOS half cannot be
+//     verified from the machine cmote is developed on — it compiles on a CI runner and runs on
+//     neither — so this is one to do WITH a mac in front of you, both halves at once.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

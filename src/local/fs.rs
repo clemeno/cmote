@@ -672,6 +672,17 @@ fn zone() -> TimeZone {
 /// at UTC there. `ponytail:` the times are then right about the instant and wrong about the wall
 /// clock, which is the same state a remote with no `date` leaves the pane in (§20) — but it is a
 /// visible gap on the machine the user is sitting at, and it is the thinner half of §103.
+///
+/// **Two ways to close it, both known.** `localtime_r` through `libc` — already in the dependency
+/// tree, so a direct dependency line and one `unsafe` call rather than a new crate to compile. Or
+/// the `date +'%z %Z'` probe cmote ALREADY runs for a remote (§20), pointed at this machine: the
+/// same answer by the road that is written and tested, at the price of one process per session,
+/// which is what the Windows path exists to avoid.
+///
+/// Not done here because it cannot be *seen* here: this arm compiles on a CI runner and runs on
+/// nobody's screen in this development loop, and a timezone fix is judged by looking at a
+/// timestamp. One to do with a mac in front of you — the same conclusion `local::copy`'s mtime gap
+/// reaches, for the same reason.
 #[cfg(target_os = "macos")]
 fn zone() -> TimeZone {
 	TimeZone::default()
