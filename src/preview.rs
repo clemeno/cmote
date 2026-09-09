@@ -271,8 +271,9 @@ mod tests {
 	}
 
 	/// `ponytail:` WebP is absent from this list because `image`'s WebP support is decode-only, so
-	/// the test cannot build its own fixture the way it does for the other four. It is covered by
-	/// the format table and by hand (README's walkthrough), not here.
+	/// this test cannot build its own fixture the way it does for the other four. What WebP needs
+	/// pinning for does not need a fixture, and is
+	/// [`the_named_formats_are_exactly_the_ones_compiled_in`](Self::) below.
 	#[test]
 	fn every_enabled_format_opens() {
 		for (format, name) in [
@@ -284,6 +285,37 @@ mod tests {
 			let decoded = decode_image(&encoded(2, 2, format)).expect("an enabled format opens");
 			assert_eq!(decoded.format, name, "{name} names itself");
 		}
+	}
+
+	/// `format_name`'s list and `Cargo.toml`'s feature list are the same claim written twice, and
+	/// only one of them is checked by the compiler. Its own doc says why that matters: naming a
+	/// format whose codec is NOT compiled in turns the careful refusal back into the internal
+	/// "unsupported" error the function exists to replace, and naming one fewer than is compiled in
+	/// refuses a picture cmote could actually have shown.
+	///
+	/// So the two directions are asserted against `image`'s own answer rather than against a copy
+	/// of the list. This is what covers **WebP**, whose decode cannot be reached from a test at all
+	/// — `image`'s WebP support is decode-only, so there is no way to encode a fixture — and the
+	/// risk for it was never the decoding. It was an edit to `Cargo.toml`.
+	#[test]
+	fn the_named_formats_are_exactly_the_ones_compiled_in() {
+		for format in image::ImageFormat::all() {
+			assert_eq!(
+				format_name(format).is_some(),
+				format.reading_enabled(),
+				"{format:?}: `format_name` and the compiled-in codecs disagree — the promise in \
+				 `decode_within`'s refusal names PNG, JPEG, GIF, BMP and WebP, and `Cargo.toml` \
+				 has to be the same five"
+			);
+		}
+		// And the count, so dropping a feature AND its name together still speaks up.
+		assert_eq!(
+			image::ImageFormat::all()
+				.filter(|format| format_name(*format).is_some())
+				.count(),
+			5,
+			"five formats are previewed, and the sentence in the refusal says so"
+		);
 	}
 
 	#[test]
