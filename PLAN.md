@@ -44,8 +44,10 @@ for disambiguate, press / repeat / release events, report-all and associated tex
 modifyOtherKeys when an editor turns it on, §25). Everything since v2.3.0 lands in the one
 **v3.0.0** major release — §23, §24 and §25 are all part of it, with no point increments above
 3.0.0; and everything since *that* lands the same way in the one **v4.0.0** major release —
-§32 through §50, with no point increments in between (the 3.1.0 the manifest carried for a
-while was work in progress, never tagged, and is folded in here). What earns the major number
+**§31 through §171**, with no point increments in between (the 3.1.0 the manifest carried for a
+while was work in progress, never tagged, and is folded in here). PLAN.md at the 3.0.0 tag ended
+at section 30, which is what makes that range exact rather than remembered; `CHANGELOG.md` is the
+same span written for someone choosing whether to download it. What earns the major number
 is that two of them change what a cmote window *is*: it can be **split** in two, each half with
 its own tab strip and its own session on screen at once (§48), and one connection can hold
 **more than one account**, with the file panes following the account you switched to (§45, §46).
@@ -20061,3 +20063,122 @@ a raw space in it from first principles, which is exactly why the raw-space path
 **And a feature can be complete, correct, and still reported as broken** — because the thing the user
 was told to look for did not exist. The install worked on the first attempt. The bug was in the
 sentence describing the result.
+
+## §171 — The pre-release read: what 49 deliberate shortcuts said, and the build nobody was running
+
+Before tagging 4.0.0, a read of every `ponytail:` marker in the tree — the convention being that a
+deliberate shortcut names its ceiling and its upgrade path, so the collection of them is the honest
+answer to "what is not finished". 53 hits: 49 markers, three cross-references to another marker, and
+one already resolved (§53's decode, measured at ~280 ms and moved off the UI thread).
+
+**The flat count is the least useful thing about it.** 32 name no trigger, which sounds like 32
+things rotting — and about a dozen of those are *decided*: origin mode refused rather than
+approximated because tracking DECSTBM is a second copy of engine state (§56); two copy loops rather
+than one generic one, the risk parked in the path that runs on almost no server; a plain settings
+write because the next run reads the default anyway. A marker with no trigger is not automatically
+debt. It is also not automatically fine. **The split worth making is decided-versus-rotting**, and it
+cannot be made by grepping — only by reading what each one says.
+
+**No `PONYTAIL-DEBT.md` was written**, though the sweep offers one. It would be a second copy of 49
+comments, stale the moment one is edited, and §16 is already the deferred ledger. §153 turned down
+the same shape for the terminfo database, for the same reason.
+
+### What the read actually found
+
+**Three comments still said "v1"**, four majors on. Two were stale wording — the context menu's
+missing edge clamp, and the non-bracketed paste that runs embedded newlines, both now stated as
+decisions with what would reopen them. The third was **wrong**: `ssh::client::Handler` claimed *"the
+one method that matters for v1 is the host-key gate; every other callback keeps its default (no-op)
+behavior"*, and `server_channel_open_forwarded_tcpip` has been implemented since §27 — a `-R` remote
+forward exists only because that method answers.
+
+**WebP's note was apologising for the wrong thing.** It said WebP is untested because `image`'s
+support is decode-only, so no fixture can be encoded. True, and beside the point: `format_name`
+names five formats and `Cargo.toml` enables five codecs, and *that* is the pair that can disagree.
+Its own doc says what a disagreement costs — a format named without its codec turns the careful
+refusal back into the internal "unsupported" error the function exists to replace. `ImageFormat::all()`
+and `reading_enabled()` are `image`'s own answer, so both directions are now asserted against the
+crate rather than a copy of the list. Dropping `"webp"` from `Cargo.toml` fails that one test and no
+other.
+
+**The one exception to §12 was sized instead of apologised for.** `load_ppk` read "a small
+secret-hygiene gap the crate's API forces on us. Acceptable for now; noted honestly" — honest, and
+unusable: a reader could not tell whether it was one copy or ten, or what would change it. Now it
+quotes the signature (`ssh-key` 0.7.0-rc.11 takes `passphrase: Option<String>` **by value**), states
+that there is exactly one copy and it is the crate's, that nothing outside `ssh-key` can zero a value
+that was moved in, and that the trigger is upstream — the pinned version being a release candidate.
+It also says what it does *not* fix, rather than implying that away: an unencrypted key file's
+plaintext sits in the plain `String` both decoders read from, which RAM hygiene is not what protects.
+
+**Two local-session gaps were left as gaps, on purpose.** A local copy does not carry the source's
+mtime where the SFTP upload does, and a macOS files pane renders times at UTC. Both want a platform
+call, and the fix for the first is worse than the gap if only half is done: `SetFileTime` alone would
+preserve times on Windows and not on macOS, which is harder to explain than "no local copy preserves
+them". Both notes now name their candidate fixes — `localtime_r` through `libc`, already in the tree,
+or the `date` probe cmote already runs for a remote — and the shared reason they stop here: **this
+arm compiles on a CI runner and runs on nobody's screen in this loop**, and a timezone fix is judged
+by looking at a timestamp.
+
+**And one marker turned out to describe an inconsistency, not a limit.** Search matches within one
+grid row, so a hit across a wrapped line is missed — while a selection and a copy DO treat a wrapped
+line as one logical line (§42), and the primitive that settles it, `Screen::line_wrapped`, is already
+written, public and used. So two paths in the same terminal disagree about what a line is. What
+costs is not *finding* the match but *being* one: a `SearchMatch` is one line and one span, and
+emitting one per row segment would paint correctly for free while breaking the three things that
+treat a match as a thing — the count, the step to next, and the rescan that keeps the current match
+by identity.
+
+### The finding that was not on the list
+
+A doc link written during the sweep needed checking, so `cargo doc` was run.
+
+**It did not build, and had not for some time: eighteen errors.** The green gate is five commands and
+CI runs four of them; not one is `cargo doc`, so every one of those errors landed green.
+
+* **Eleven unresolved links.** Six named `csi::Framer` or `Csi::sub_parameters` from other modules —
+  and `mod csi` is **private**, so they could never have resolved from there. Four named `pub(super)`
+  or private items, which rustdoc does not document and therefore cannot link.
+* **Six unclosed HTML tags.** `Ctrl+<char>`, and the `<span>` / `<pre>` in `ui::richcopy`'s prose
+  about the HTML it writes — parsed as markup, so those sentences rendered mangled. And `rect.rs`'s
+  scrollback diagram had `[ discarded ]` read as a link.
+* **One factual error, which is the interesting one.** `Runner::output` called itself "the inherent
+  form of `Exec::output`" and spoke of "these three questions". `Exec` has no `output`, and it has
+  **two** methods — `stdout` and `succeeds`, both built on this one. A wrong sentence about a trait's
+  own shape, sitting in the file that defines it, found by a *doc build* rather than by any reader.
+
+`cargo doc --no-deps` is the sixth gate step now, and a CI step on the Windows job carrying the same
+`!cancelled()` the tests do (§115) — a red clippy must not hide a red doc build any more than it may
+hide a red test. No extra flags: `[lints.rust] warnings = "deny"` reaches rustdoc too, which is why
+all eighteen were already errors. Nothing was ignoring them; nothing was asking.
+
+### And a CHANGELOG
+
+The release pipeline attaches binaries to a **draft** release for a human to publish, and there was
+nothing to publish them with. `CHANGELOG.md` covers 3.0.0 → 4.0.0 — grouped by what a user would
+notice rather than by section order, with the section number on every line, and saying outright that
+it is a summary and not the record. The range is exact rather than estimated: PLAN.md at the 3.0.0
+tag ended at section 30, so §31–§170 is this release. 1.x–3.0.0 predate the file and are pointed at
+PLAN.md rather than reconstructed from tags.
+
+### What to keep
+
+**The check nobody runs is the one that rots.** Not the check that fails and gets ignored — that one
+is visible. `cargo doc` was never in the gate, so eighteen errors accumulated with every commit
+passing five green commands. Worth asking, of any project: which build is not in the gate? The
+answer is where the rot is.
+
+**The risk is not always where the note says it is.** WebP's marker apologised at length for a decode
+that cannot be tested, and the thing that could actually break was a line in `Cargo.toml` — cheap to
+pin, and never pinned, because the note had aimed the reader's attention at the untestable half. A
+marker that names a ceiling is still a claim about *where* the danger is, and that claim can be
+wrong.
+
+**Half a platform fix is worse than none.** Preserving a local copy's mtime on Windows only would
+turn "cmote never preserves it" into "it depends which OS you copied on". A gap that is uniform is
+explainable; one that is conditional is a bug report waiting to happen.
+
+**"Acceptable for now" is not documentation.** It records that someone thought about it and nothing
+that lets the next reader think about it too. The version worth having names the size of the
+exposure, why no cheaper version exists, and what would change it — and if the honest answer is "the
+trigger is upstream", that is a fine thing to write, because it tells the reader where to look rather
+than implying the work is theirs.
