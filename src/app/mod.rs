@@ -3900,7 +3900,7 @@ impl Tab {
 		}
 	}
 
-	/// The home screen's state, mutably — the twin of [`Tab::home_screen`].
+	/// The home screen's state, mutably — the twin of `Tab::home_screen`.
 	pub(super) fn home_screen_mut(&mut self) -> Option<&mut HomeScreen> {
 		match &mut self.content {
 			TabContent::Home(home) => Some(home),

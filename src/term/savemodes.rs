@@ -75,7 +75,7 @@ pub struct SaveModesRequest {
 /// The XTSAVE / XTRESTORE scanner (§141). Feed it every byte of shell output; it reports where each
 /// of the pair sat and which modes it named.
 ///
-/// The CSI grammar is [`csi::Framer`]'s (§111); what is left here is deciding which of the two
+/// The CSI grammar is `csi::Framer`'s (§111); what is left here is deciding which of the two
 /// sequences a finished CSI is, and reading its parameter list.
 #[derive(Debug, Default)]
 pub struct SaveModes {
@@ -122,7 +122,7 @@ impl SaveModes {
 /// and the loop's cost is the split advance, which the common chunk should not pay.
 ///
 /// Sub-parameters rule it out. `Pm` is a list of modes and DEC and xterm spell every such list with
-/// `;`, so `CSI ? 1 : 2 s` is a spelling neither defines — the rule [`Csi::sub_parameters`] exists to
+/// `;`, so `CSI ? 1 : 2 s` is a spelling neither defines — the rule `Csi::sub_parameters` exists to
 /// leave at the site that knows its own sequence (§111).
 ///
 /// An EMPTY field inside the list is skipped rather than read as a mode. `CSI ? 25 ; ; 1000 s` names

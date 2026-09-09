@@ -87,7 +87,7 @@ const APOSTROPHE: u8 = b'\'';
 /// The DEC locator scanner (§140). Feed it every byte of shell output; it reports where each DECRQLP
 /// sat, for `term/mod.rs` to answer.
 ///
-/// The CSI grammar is [`csi::Framer`]'s (§111); what is left here is this module's own question —
+/// The CSI grammar is `csi::Framer`'s (§111); what is left here is this module's own question —
 /// whether a finished sequence is the locator request, as against the two locator settings that wear
 /// the same intermediate and are deliberately inert.
 #[derive(Debug, Default)]

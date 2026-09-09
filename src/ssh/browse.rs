@@ -228,7 +228,7 @@ async fn dirs_inside<W: Walk + Send + Sync + 'static, E: Exec + Sync>(
 /// fake below, answers each request only after yielding, so a wave's requests overlap and their
 /// high-water mark is a number a test can read.
 ///
-/// It is the same seam [`Exec`](super::asuser::Exec) draws for the shell backend, on the same rule:
+/// It is the same seam [`Exec`] draws for the shell backend, on the same rule:
 /// a request that is **a value in and a value out** belongs on the trait, and an operation handing
 /// back a live `russh` stream does not. The transfer loops' `open`/`read`/`write` therefore stay on
 /// the concrete session, for exactly the reason `Exec` leaves `stream` off (§46, §113).

@@ -273,7 +273,7 @@ mod tests {
 	/// `ponytail:` WebP is absent from this list because `image`'s WebP support is decode-only, so
 	/// this test cannot build its own fixture the way it does for the other four. What WebP needs
 	/// pinning for does not need a fixture, and is
-	/// [`the_named_formats_are_exactly_the_ones_compiled_in`](Self::) below.
+	/// `the_named_formats_are_exactly_the_ones_compiled_in` below.
 	#[test]
 	fn every_enabled_format_opens() {
 		for (format, name) in [

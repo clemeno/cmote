@@ -116,7 +116,7 @@ pub enum DsrRequest {
 /// The DEC-private DSR scanner (§82). Feed it every byte of shell output; it reports where each
 /// cursor-position request sat, for `term/mod.rs` to answer from the live cursor.
 ///
-/// The CSI grammar is [`csi::Framer`]'s (§111); what is left here is the allow-list below.
+/// The CSI grammar is `csi::Framer`'s (§111); what is left here is the allow-list below.
 #[derive(Debug, Default)]
 pub struct Dsr {
 	framer: super::csi::Framer,

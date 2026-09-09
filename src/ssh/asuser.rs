@@ -306,9 +306,10 @@ impl Runner {
 		}
 	}
 
-	/// Run a shell snippet as this account and collect what it printed. The inherent form of
-	/// [`Exec::output`]; the trait exists so the callers that only ever ask these three questions
-	/// can be driven by something other than a live connection.
+	/// Run a shell snippet as this account and collect what it printed. The one both of [`Exec`]'s
+	/// methods are built on — `stdout` narrows this to the text, `succeeds` to the verdict — and the
+	/// trait exists so the callers that only ever ask those two questions can be driven by something
+	/// other than a live connection.
 	///
 	/// The retry is the password rule in code: the first attempt is always non-interactive, and
 	/// only a refusal that names the missing password earns a second attempt with it. A `-S`

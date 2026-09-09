@@ -213,7 +213,7 @@ fn scrub_end_marker(bytes: &[u8], out: &mut Vec<u8>) {
 	}
 }
 
-/// The C0 control byte for a Ctrl+<char> combo, following the standard mapping
+/// The C0 control byte for a `Ctrl+<char>` combo, following the standard mapping
 /// (Ctrl-A..Ctrl-Z = 0x01..0x1a, plus the handful of symbol combos). `None` for
 /// characters that have no control code.
 fn control_byte(character: &str) -> Option<u8> {

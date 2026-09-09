@@ -44,7 +44,7 @@ pub const INTERVAL: u16 = 8;
 /// The DECST8C scanner (§74). Feed it every byte of shell output; it reports where each tab-stop
 /// reset sat, for `term/mod.rs` to carry out.
 ///
-/// The CSI grammar is [`csi::Framer`]'s (§111); what is left here is the one question that is this
+/// The CSI grammar is `csi::Framer`'s (§111); what is left here is the one question that is this
 /// module's own — whether a finished sequence is DECST8C.
 #[derive(Debug, Default)]
 pub struct Tabs {

@@ -2421,6 +2421,21 @@ impl Terminal {
 	/// `ponytail:` matches are found within one grid ROW, so a hit that straddles the wrap of a
 	/// long logical line is not found (the two halves are separate rows), and a cell's combining
 	/// marks are not searched — only its base glyph. An empty query finds nothing.
+	///
+	/// **This one is an inconsistency, not just a limit**, which is worth knowing before deciding it
+	/// is small: a selection and a copy DO treat a wrapped line as one logical line — a triple click
+	/// takes the whole thing and a copy re-joins the halves rather than pasting a newline into the
+	/// middle of a path (§42). So two paths in the same terminal disagree about what a line is, and
+	/// the primitive that settles it, `Screen::line_wrapped` (`term/screen.rs`), is already written,
+	/// public and used.
+	///
+	/// **What actually costs, then, is not finding the match — it is being one.** A `SearchMatch` is
+	/// one line and one column span, and a hit across a wrap needs two. Emitting one per row segment
+	/// would PAINT correctly for free, because the renderer already takes a list — and would break
+	/// the three things that treat a match as a thing: the count, the step to next, and the rescan
+	/// that keeps the current match by identity across new output (`term::search`). One hit would
+	/// become two to walk through. So the upgrade is a span that knows it is one match in two
+	/// places, and it is worth doing when someone loses a search to a wrap, not before.
 	pub fn find(&self, query: &str) -> Vec<search::SearchMatch> {
 		if query.is_empty() {
 			return Vec::new();

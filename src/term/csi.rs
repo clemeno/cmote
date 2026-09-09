@@ -118,7 +118,7 @@ pub struct Params {
 	/// OMITTED parameter. Dropping leading zeros leaves an all-zero field with nothing written, so
 	/// `CSI # 1 ; 0 {` and `CSI # 1 ; {` would render identically — and a scanner that treats an
 	/// empty field as malformed (§99's SGR stack does, deliberately) would then drop a sequence that
-	/// named zero perfectly well. [`close_field`] writes the zero back.
+	/// named zero perfectly well. `close_field` writes the zero back.
 	field_started: bool,
 	/// Whether any separator in the run was a `:` rather than a `;` — see [`Csi::sub_parameters`] for
 	/// what a scanner does about it.

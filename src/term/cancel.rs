@@ -95,7 +95,7 @@ const KEPT_PARAMS: usize = 2;
 /// The misparse scanner (§57). Feed it every byte of shell output; it reports the offset of each
 /// final byte the engine must not be allowed to dispatch.
 ///
-/// One field, because the CSI grammar is [`csi::Framer`]'s (§111) and the shape test is the whole of
+/// One field, because the CSI grammar is `csi::Framer`'s (§111) and the shape test is the whole of
 /// what this module decides. It kept the most hand-rolled state of the ten before the move — a
 /// parameter counter, a slot index, two half-read numbers and a `plain` flag — and every one of them
 /// was a re-derivation of something the framer now reports.

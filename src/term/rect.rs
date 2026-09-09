@@ -823,8 +823,10 @@ impl Checksum {
 /// about it. Write the document as `[history 0..H] [page 0..R]`, absolute index being the position
 /// in that list, and unscroll `lines` of which `N` could be filled from the scrollback:
 ///
-///   before   [ history 0..H-N ][ history H-N..H ]                 [ page 0..R-lines ][ discarded ]
-///   after    [ history 0..H-N ][ blanks × (lines-N) ][ the same H-N..H ][ the same 0..R-lines ]
+/// ```text
+/// before   [ history 0..H-N ][ history H-N..H ]                 [ page 0..R-lines ][ discarded ]
+/// after    [ history 0..H-N ][ blanks × (lines-N) ][ the same H-N..H ][ the same 0..R-lines ]
+/// ```
 ///
 /// So a line before the consumed history keeps its number; everything from there down moves by the
 /// number of BLANKS, not by `lines`; and the page's bottom `lines` rows are gone. When the

@@ -20,7 +20,7 @@ use crate::ui::selection::Selection;
 
 /// The resolved appearance of a run of cells: RGB foreground/background (already accounting for
 /// reverse video, faint and conceal) and the boolean text attributes. Equality drives run
-/// merging — adjacent cells with an equal `Style` share one <span>.
+/// merging — adjacent cells with an equal `Style` share one `<span>`.
 #[expect(
 	clippy::struct_excessive_bools,
 	reason = "the four SGR attributes that map one-to-one onto CSS properties, independent as SGR \
@@ -37,7 +37,7 @@ struct Style {
 }
 
 /// Serialise the current `selection` over `screen` to a styled HTML fragment (PLAN §10). Returns
-/// an empty string when nothing is selected. Rows are joined with a newline inside the <pre>, so
+/// an empty string when nothing is selected. Rows are joined with a newline inside the `<pre>`, so
 /// the pasted block keeps the terminal's line breaks and monospaced columns — except across a WRAP,
 /// where the two rows are one logical line the terminal folded and are joined with nothing (§42),
 /// exactly as the plain-text copy does.
@@ -98,8 +98,8 @@ fn emit_row(html: &mut String, cells: &[Cell], reversed: bool) {
 	flush_run(html, &run, run_style.as_ref(), reversed);
 }
 
-/// Write one finished run: the escaped text wrapped in a <span> when its style differs from the
-/// <pre> default, or bare text when it does not (the common case, so the HTML stays lean).
+/// Write one finished run: the escaped text wrapped in a `<span>` when its style differs from the
+/// `<pre>` default, or bare text when it does not (the common case, so the HTML stays lean).
 fn flush_run(html: &mut String, run: &str, style: Option<&Style>, reversed: bool) {
 	if run.is_empty() {
 		return;
@@ -142,7 +142,7 @@ fn style_of(cell: &Cell, reversed: bool) -> Style {
 	}
 }
 
-/// The CSS for a style, empty when it is exactly the <pre> default (so the caller can skip the
+/// The CSS for a style, empty when it is exactly the `<pre>` default (so the caller can skip the
 /// span). Only the properties that differ from the default are emitted.
 fn style_css(style: &Style, reversed: bool) -> String {
 	let mut css = String::new();

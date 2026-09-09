@@ -138,7 +138,7 @@ impl Tab {
 
 	/// Open a session on THIS machine (§103) — the home screen's Local bar.
 	///
-	/// The twin of [`dial`], and shorter for everything it does not have to do. There is no target to
+	/// The twin of `dial`, and shorter for everything it does not have to do. There is no target to
 	/// capture (a local shell is not a target: no host, no account, nothing to remember), no secret to
 	/// store, and no passphrase state to reset — so `abandon_attempt` runs to drop anything a previous,
 	/// abandoned connect attempt left behind rather than to prepare for this one.
