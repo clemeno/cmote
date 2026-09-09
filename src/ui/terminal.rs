@@ -914,8 +914,10 @@ fn step_button(label: &str, message: Message, enabled: bool) -> Element<'_, Mess
 /// rule as the status bar), which the chrome dims. When the clicked cell is an OSC 8 link,
 /// `link` carries its URI and two more items — Open link and Copy link — are added (§24).
 /// `point` is local to the grid, which sits below the status bar in the stack, so shift it
-/// down by the bar height to place the panel under the cursor. `ponytail:` no edge clamping
-/// — near the window's right/bottom the panel can run past the edge; good enough for v1.
+/// down by the bar height to place the panel under the cursor. `ponytail:` no edge clamping —
+/// near the window's right or bottom the panel can run past it. Four major versions have shipped
+/// without anyone reaching for a clipped item, so this is where it stops rather than something
+/// pending; the trigger that would change it is an item becoming unreachable, not an untidy edge.
 fn context_menu(
 	point: Point,
 	has_selection: bool,

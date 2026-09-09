@@ -816,9 +816,11 @@ async fn stream(
 	Ok(())
 }
 
-/// Our russh event handler. The one method that matters for v1 is the host-key
-/// gate; every other callback keeps its default (no-op) behavior. `pub(crate)` because
-/// the auth module (`ssh::auth`) names it as the session's handler type.
+/// Our russh event handler. Two callbacks are implemented and every other keeps its default
+/// (no-op) behaviour: `check_server_key`, the host-key gate (§6), and
+/// `server_channel_open_forwarded_tcpip`, which is how a channel the SERVER opens for a remote
+/// forward arrives at all (§27) — a `-R` forward exists only because this method answers.
+/// `pub(crate)` because the auth module (`ssh::auth`) names it as the session's handler type.
 pub(crate) struct Handler {
 	host: String,
 	port: u16,

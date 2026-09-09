@@ -179,8 +179,11 @@ pub fn encode(
 ///
 /// `ponytail:` in the non-bracketed case, embedded newlines in the paste execute
 /// immediately — that is how a plain terminal has always behaved, and bracketed
-/// paste (which most modern shells enable) is the fix. We do not second-guess it
-/// with our own confirmation prompt in v1.
+/// paste (which most modern shells enable) is the fix.
+///
+/// **Decided, not deferred.** A confirmation prompt of cmote's own would diverge from every
+/// terminal a user has typed in, on a stream the shell is already able to bracket. The remote
+/// decides this by enabling mode 2004, which is the right place for it to be decided.
 pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
 	if !bracketed {
 		return text.as_bytes().to_vec();
