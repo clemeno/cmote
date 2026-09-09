@@ -1013,7 +1013,11 @@ the hook there, right-click the terminal → **Shell integration…**: the dialo
 shell and its config file (`bash`, `/home/tester/.bashrc`), show the block it would append, and on
 **Install** report the file it wrote. Nothing changes in the open session; **reconnect**, and the
 title should now carry the directory, **Sync**/**Reveal** should come out of their dimmed state, and
-`history | tail` on the remote should show no trace of it. Reopen the dialog and it should offer
+`history | tail` on the remote should show no trace of it. A cyan **tick** should appear in the left
+gutter beside each prompt, and the **dot on the tab chip** should go green after `true` and red
+after `false` — on bash it never goes amber, because the block deliberately sends no `OSC 133;C`
+(§17). The dot is the only place the exit status shows, and it shows as a colour, never as a glyph
+or a number. Reopen the dialog and it should offer
 **Remove**, which puts `.bashrc` back exactly as it was. Set a title from a program
 (`printf '\033]2;my title\033\\'`) and the bar should switch to `cmote — tester@localhost:2222
 — my title`; clearing it (`printf '\033]2;\033\\'`) brings the directory back (§23). Then:

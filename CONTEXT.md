@@ -245,6 +245,19 @@ Where a shell says its own prompt begins, announced with OSC 133 (§34). The old
 things this project called a prompt, and the reason the other two are qualified.
 _Avoid_: prompt, unqualified — that is the connect form's (see **Prompt**)
 
+**Tick**:
+The small cyan mark in the grid's left padding gutter beside every prompt on screen (§34). It says
+*a prompt was here* and nothing more: its colour separates a shell prompt from a script's own
+bookmark (OSC 1337 SetMark, §55), never success from failure.
+_Avoid_: reading any exit status into it — that is the **Dot**
+
+**Dot**:
+The command-status light on a tab's chip (§34): amber while a command runs, green when the last one
+exited 0, red when it failed, absent on a tab whose shell announces nothing. The ONLY place an exit
+status is shown, and it shows as a colour — never a glyph, never the number, because a 30-pixel chip
+has no room for `✗130`. On bash it never goes amber, the block sending no `OSC 133;C` (§17).
+_Avoid_: ✓/✗, which two code comments promised and no version ever drew (§170)
+
 **Held update**:
 The frame `vte` is buffering while a program has mode 2026 open — written to the terminal but not
 yet on screen (§122). It is *held*, never "synchronized": `sync_alternate` is a different thing

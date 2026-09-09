@@ -19972,3 +19972,92 @@ the assertion that reads the order back passes on any order at all. What made it
 the fake the precondition the real server enforces. When a rule is about *sequence*, ask what would go
 wrong on the real thing if the sequence were wrong, and put that in the fake — the assertion is the
 easy half.
+
+## §170 — The block was run, and the comment about it was wrong in two ways
+
+§169 ended with the seam covered and nothing open. This is the other half of the same habit applied
+to a feature that was already built: **the shell-integration block had never been run by anything
+that checked what came out of it.**
+
+The provocation is in `BASH_BLOCK`'s own doc comment. It records the ST-vs-BEL bug — a `\`
+immediately followed by `\033` does not survive bash's `printf`, so the next sequence comes out as
+the literal text `033]7;…` — and says it was *"found by running the block rather than by reading it,
+which is the only way this kind of thing is ever found."* The only test then greps the string
+literal.
+
+### Running it
+
+`bash --rcfile -i` under GNU bash 5.2.37, in a directory named `cmote probe`, with `true` and then
+`false` at the prompt. It emits what it claims to:
+
+```
+ESC ] 133 ; D ; 0 BEL   ESC ] 7 ; file://HOST/tmp/cmote probe BEL   ESC ] 133 ; A BEL
+...and ESC ] 133 ; D ; 1 BEL after the command that failed
+```
+
+Those bytes are now the test's input, verbatim, fed to `term::cwd` and `term::osc133`. Two things
+that reaches which the grep cannot:
+
+* **Three OSCs arrive in ONE write with no separator.** Whether they frame apart is a question about
+  the reader, and the literal cannot answer it.
+* **The path is emitted unencoded.** The `ponytail:` note skips percent-encoding on the reasoning
+  that "cmote's own reader takes a raw path fine" — a claim about a *different module*, in a comment.
+
+The prove-it for the second is the one worth keeping. Splitting the payload on a space before
+decoding it is **RFC-correct** — parse the URI, then decode — and it leaves the existing `%20` test
+green while turning `/tmp/cmote probe` into `/tmp/cmote`. 1828 passed, 1 failed. A silently wrong
+directory is what Sync and Reveal then act on.
+
+### And then a user installed it
+
+Reported from a Rocky account, `/home/rocky/.bashrc`: title, **Sync** and **Reveal** all came up,
+the gutter tick appeared, and there was no ✓ or ✗ anywhere.
+
+**There is no ✓ or ✗.** The per-tab indicator has always been a coloured dot — amber running, green
+exit 0, red non-zero — and §34 says so exactly, down to *"the exit code itself is not shown, only
+success/failure by colour; a chip is too small for `✗130`."* The glyph existed in two doc comments
+and nowhere in the UI.
+
+Worth being precise about the direction of the drift. Every *document* was right: §34, the README,
+and the compatibility matrix all say "status dot". The two **code comments** had drifted away from
+the design record, and one of them was quoted to the user, who went to look for a glyph that had
+never been drawn. The record was the reliable copy and the comment beside the code was not, which is
+the opposite of the usual assumption.
+
+### The cycle a real bash sends
+
+The behaviour underneath was right, and had no test. The existing cycle test feeds the textbook
+order:
+
+```
+A  ->  B  ->  C  ->  D          the four marks, in the order the proposal describes
+D  ->  A                        what cmote's own block actually sends, and no C at all
+```
+
+bash can only report a command's start through the global `DEBUG` trap, which §17 refuses to take —
+so `C` never comes, `D` arrives *before* the `A` of the next prompt, and the exit code still has to
+reach the dot. Every bash install cmote performs depends on that.
+
+Proven by the change a stricter state machine would make: record the exit only when a command was
+seen to be `Running`. **1829 passed, 1 failed** — the textbook test stays green while every bash
+account silently loses its status dot.
+
+### What to keep
+
+**A comment that describes a UI is a claim about another module.** `BASH_BLOCK`'s note reached across
+to `term::cwd`, and `CommandState`'s reached across to `ui::tabs`; both were written where the
+compiler cannot see them and neither had a test. The rule that fell out: when a comment says what
+some *other* file does, that is a test waiting to be written, not documentation.
+
+**The design record outlived the code comment.** §34 was written once and stayed true; the comments
+next to the code drifted. So when the two disagree, the record is not automatically the stale one —
+check which claim has a test under it, because that is what actually holds either of them still.
+
+**Running the thing is a different act from testing the thing.** The suite had eleven tests on this
+block and none of them had ever executed a line of shell. One `bash -i` produced the input for a
+test that could not have been imagined accurately: nobody writes `file://HOST/tmp/cmote probe` with
+a raw space in it from first principles, which is exactly why the raw-space path had no test.
+
+**And a feature can be complete, correct, and still reported as broken** — because the thing the user
+was told to look for did not exist. The install worked on the first attempt. The bug was in the
+sentence describing the result.
