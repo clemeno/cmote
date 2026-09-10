@@ -211,6 +211,10 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 		};
 		forward(session.as_ref(), message).await;
 	}
+	// The GUI dropped the command sender, which only happens when this tab's subscription is torn
+	// down — so the session below is about to see its own channel close and report `Disconnected`
+	// for a reason that started up here. Said out loud, because the two look identical downstream.
+	eprintln!("ssh worker stopped: the GUI dropped the command channel");
 }
 
 /// Send one message to the live session, if there is one.
@@ -596,7 +600,14 @@ async fn stream(
 					// That account's shell has gone, so its file access goes too (§46): dropping its
 					// entry closes the sftp session it held, which ends the elevated `sftp-server`.
 					shell::After::Ended(identity) => accounts.remove(identity),
-					shell::After::SessionOver => break,
+					// Named on the way out. Every ending below reaches the GUI as the same bare
+					// `Disconnected`, and the GUI's only answer to it is to go home — so a session
+					// that ends for a reason nobody asked for is indistinguishable, on screen, from
+					// one the user ended. The reason is only knowable HERE.
+					shell::After::SessionOver => {
+						eprintln!("session over: the login shell's channel closed");
+						break;
+					}
 				}
 			}
 			// A local/dynamic forward accepted a connection (§27). Open its SSH channel here —
@@ -805,7 +816,18 @@ async fn stream(
 					}
 					// Explicit disconnect, or run() dropped the link. Every shell goes, not just the
 					// login one (§45) — an elevated shell left running would hold the connection.
-					Some(SessionMsg::Disconnect) | None => {
+					//
+					// The two are written apart even though they wind down identically, because they
+					// mean opposite things: one is the user leaving, the other is the command channel
+					// closing under a session the user still had open — and both arrive at the GUI as
+					// the same `Disconnected`.
+					Some(SessionMsg::Disconnect) => {
+						eprintln!("session over: the GUI asked to disconnect");
+						shells.eof_all().await;
+						break;
+					}
+					None => {
+						eprintln!("session over: the command channel closed");
 						shells.eof_all().await;
 						break;
 					}

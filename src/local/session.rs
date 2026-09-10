@@ -115,6 +115,11 @@ pub async fn run(
 	// remote session loop keeps the same map for the same reason — see the `FileLoad` arm below.
 	let mut viewer_cancels: HashMap<u64, Arc<AtomicBool>> = HashMap::new();
 
+	// Each of the four ways out of the loop below names itself on stderr before it goes. All four
+	// reach the GUI as the same bare `Disconnected`, and the GUI's only answer to that is to go home
+	// — so a session that ended for a reason nobody asked for looks, on screen, exactly like one the
+	// user ended, and the difference is only knowable here. A debug build keeps its console
+	// (`main.rs`), so this is readable at the moment it happens.
 	loop {
 		tokio::select! {
 					// Output first, always. `select!` picks at random among the branches that are ready, so
@@ -128,14 +133,13 @@ pub async fn run(
 					// once cmote itself tore the pty down — so it is a way OUT of this loop but never the reason,
 					// and the reason is the branch below.
 					chunk = stream.bytes.recv() => {
-						match chunk {
-							Some(bytes) => {
-								let _ = events
-									.send(SshEvent::Output { identity: crate::bridge::LOGIN_IDENTITY, bytes })
-									.await;
-							}
-							None => break,
-						}
+						let Some(bytes) = chunk else {
+							eprintln!("local session over: the pty output stream ended");
+							break;
+						};
+						let _ = events
+							.send(SshEvent::Output { identity: crate::bridge::LOGIN_IDENTITY, bytes })
+							.await;
 					}
 					// The shell exited: the user typed `exit`, or the program died. THIS is what ends a local
 					// session by itself — see `pty`'s note on why waiting for the output stream to end instead
@@ -151,6 +155,7 @@ pub async fn run(
 								.send(SshEvent::Output { identity: crate::bridge::LOGIN_IDENTITY, bytes })
 								.await;
 						}
+						eprintln!("local session over: the shell process exited");
 						break;
 					}
 					command = commands.recv() => {
@@ -294,13 +299,17 @@ pub async fn run(
 							// immediately before this and is still the guarantee: a confirmed Disconnect ends the
 							// session.
 							Some(SessionMsg::Disconnect) => {
+								eprintln!("local session over: the GUI asked to disconnect");
 								farewell(&mut stream).await;
 								break;
 							}
 							// The command loop dropped the link without a Disconnect — the tab was dropped, or the
 							// worker went away. Nothing was typed, so there is nothing to wait for and no one left
 							// to tell: straight to the kill.
-							None => break,
+							None => {
+								eprintln!("local session over: the command channel closed");
+								break;
+							}
 						}
 					}
 				}
