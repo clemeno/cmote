@@ -11,6 +11,30 @@ itself — the one the tag will point at — rather than added afterwards. 4.0.0
 "unreleased" in the tree its own tag names, because filling the date in later is a step that
 happens after the only moment anyone is looking.
 
+## 4.0.2 — unreleased
+
+### Fixed
+
+- **Deleting a remote folder works (§173).** It did not, on any conformant server: choosing
+  **Delete…** on a folder failed with "no such file" and removed nothing. A server lists `.` and
+  `..` inside every directory, the delete walk took both for real children, and `..` is the parent —
+  so the walk climbed out of the folder it had been asked to empty and kept going until a path grew
+  too long for the server to answer.
+
+  **Worth knowing if you used it:** the failure was also what protected you. Nothing is removed
+  until the walk finishes, and that walk could not finish, so no delete ever got as far as removing
+  the wrong thing. But it had already gathered names from the folders *above* the one you picked,
+  and those are the names the removal step would have unlinked. On a server where the climb had
+  ended instead of erroring, a delete could have taken a sibling folder with it. Nothing of the sort
+  has been reported, and this closes the path to it.
+
+### Under the hood
+
+- A drop onto the files pane now records itself in a debug build's console, with how many files and
+  folders it held and what was decided — the other half of the timeline the 4.0.1 session-ending
+  diagnostics started. Nothing visible in a release build, which has no console, and the
+  drag-and-drop disconnect it was added for is still open and still unreproduced.
+
 ## 4.0.1 — 2026-09-11
 
 Eight commits on from 4.0.0, and a point release rather than a feature one: a dependency sweep
