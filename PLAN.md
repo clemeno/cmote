@@ -20449,3 +20449,94 @@ pipelining arrived for free. A silent diff is not a silent change.
 **The best finding came from a README, not a diff.** Nagle had been on since v1; no version bump
 unlocked turning it off and no compiler error was ever going to mention it. Reading what a release
 says it changed, rather than only what the compiler says you must change, is what found it.
+
+## §173 — The fake was more polite than the server: `..` was a child, and the delete climbed out
+
+Deleting a remote folder did not work. Not on that folder, not on that server — on **any conformant
+server**, since the first version that offered it (§18). Choosing **Delete…** on a folder failed
+with "no such file" and removed nothing, and the eleven tests covering the delete all passed.
+
+### The bug
+
+`remove_subtree` reads a directory with `read_names` and treats every entry the listing calls a
+directory as a child to descend into and then remove. A server lists `.` and `..` inside every
+directory — OpenSSH's `sftp-server` does, and the whole reason three other places in this codebase
+call `explorer::is_dot_link` at ingest is that they receive them — and both of those are
+directories.
+
+So `.` had the walk re-read the folder it was already standing in. `..` was the real fault, and it
+turns on a detail of our own: `explorer::join` does not normalise. The child is the literal
+`"/dir/.."`, which is not a path cmote resolves — it is a path the SERVER resolves, to the parent. So
+the walk listed one level up, found that level's `..`, and climbed, level by level, until a path
+outgrew what the server would answer and came back `NoSuchFile`. The `?` on that aborted the delete.
+
+**The error was the reprieve, and that is the part worth keeping.** `remove_subtree` discovers the
+whole tree before it removes anything — breadth-first into `dirs` and `files`, then unlink, then
+`rmdir` deepest-first — and that ordering is the only reason this was an error message rather than an
+incident. A walk that could never finish never reached the removal loop. But by the time it failed it
+had already gathered names from the folders *above* the one the user picked, and those are exactly
+what the removal loop unlinks. A server where the climb terminated rather than erroring — a shorter
+path limit, a chroot, any arrangement where `/..` stops resolving upward — would have deleted a
+sibling of the folder that was asked about.
+
+### Where the filter went, and where it deliberately did not
+
+In `read_names`, the collecting wrapper, rather than in `remove_subtree` where the damage was. The
+reason is not tidiness: a caller that forgets this filter deletes someone else's files, and that is
+not a mistake worth leaving available to the next caller. Both of `read_names`' production consumers
+want it and neither wants dot links.
+
+**Not** in `stream_names`, which `read_names` wraps and which the files pane drains progressively.
+That loop reads a wave landing no names at all as "this server never sends EOF" (§167) and stops
+walking on it. Filtering before that check would let an EMPTY directory — whose only names are `.`
+and `..` — be mistaken for a server that answers wrongly. The three ingest filters
+(`files`, `explorer`, `download`) stay where they are regardless: the local backend feeds those same
+models and does its own filtering in `local::fs`.
+
+And the doc comment above `read_names` had said keeping dot links was fine, because "the model drops
+them at ingest anyway". That was **true of the two callers that feed a model** — the pane and the
+tree both filter on the way in — and false of the one that does not. A comment that names a
+downstream guard is a claim about every caller, including the ones written after it.
+
+### Why eleven tests passed
+
+`Steps::tree`, the fake the delete tests drive, answers a `readdir` with exactly the names the test
+handed it. No `.`, no `..`. Every delete test therefore ran against a directory **more polite than
+any real one**, and the assertions were all about the right things — deepest-first ordering, a
+symlink unlinked rather than followed, a refused name naming itself — while the listing they were
+asserting against could not occur.
+
+The fake now lists dot links, and does not seed them into `present`: a real server does not refuse
+`rmdir` because a directory contains `.`, and a fake that did would have failed every folder delete
+for a reason no server has.
+
+The prove-it is the assertion output with the filter taken back out:
+
+```text
+left:  ["/p/..", "/p/.", "/p"]
+right: ["/p"]
+```
+
+The first element is an `rmdir` of the parent directory, printed by the test suite.
+
+### What to keep
+
+**A fake that is more polite than the real thing is worse than no fake.** It does not merely fail to
+catch the bug; it produces eleven green assertions that *look* like coverage of exactly the code that
+is broken. §171 asked which build is not in the gate. The sharper question is which INPUT is not in
+the fixtures — and the answer tends to be the boring, always-present, protocol-mandated thing that
+nobody thinks of as data. `.` and `..` are in every directory on earth.
+
+**A comment that delegates a guarantee downstream expires silently.** "The model drops them anyway"
+was accurate when written and stayed on the page while a caller was added that is not a model. A
+claim about what OTHER code does is a claim that no compiler checks and no test re-reads.
+
+**Discover-then-act is what turned an incident into a message.** Had `remove_subtree` unlinked as it
+walked — the obvious shape, and cheaper in memory — the first `..` would have taken real files before
+anything failed. The two-phase structure was chosen for `rmdir` ordering (§18), not for safety, and
+it paid out somewhere else entirely. Worth remembering when a loop is tempted to act on what it just
+found.
+
+**"It errors every time" and "it is safe" are different claims.** This one failed loudly and
+consistently, which reads like a harmless bug. The failure was a path-length accident on the way to a
+removal loop already holding the wrong names.
