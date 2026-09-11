@@ -6,9 +6,53 @@ not the record: every change here was designed and argued in a numbered section 
 numbers are given so a line here can be read back to its section.
 
 Versions are bare `MAJOR.MINOR.PATCH`, matching the tags. Pushing a tag is what builds the
-binaries and opens a draft release; the date below is filled in when that happens.
+binaries and opens a draft release, so the date on each heading is written in the release commit
+itself — the one the tag will point at — rather than added afterwards. 4.0.0 is why: it said
+"unreleased" in the tree its own tag names, because filling the date in later is a step that
+happens after the only moment anyone is looking.
 
-## 4.0.0 — unreleased
+## 4.0.1 — 2026-09-11
+
+Eight commits on from 4.0.0, and a point release rather than a feature one: a dependency sweep
+(§172) that asked all 21 direct dependencies for their newest version, plus the diagnostics behind
+one open bug report. Two of the three things here are speed, and both are latency rather than
+throughput — so the further away the machine you are working on, the more of it you get.
+
+### Speed
+
+- **Typing echoes sooner (§172).** Nagle's algorithm had been on for every session since 1.0: it
+  holds a small write back until the previous one is acknowledged, so as to coalesce it with
+  whatever comes next. On a terminal the small writes *are* the keystrokes, and they have nothing
+  to coalesce with — so each one waited for a round-trip that bought nothing. `TCP_NODELAY` is set
+  now, which is what OpenSSH and PuTTY both do for an interactive session.
+- **Downloads and remote file opens stop waiting between chunks (§172).** Reading a remote file
+  used to be one 32 KiB request, a full round-trip of waiting, then the next; sixteen are in flight
+  at once now, which came with russh-sftp 3.0. Uploads gain less — they were already pipelined,
+  eight deep, and are now sixteen.
+
+Both are unmeasured on a real link: the pipelining depth is what the library does and the Nagle
+change is well-understood for interactive SSH, but no before-and-after was timed against a remote
+host. On a LAN, expect to notice neither.
+
+### Fixed
+
+- **A tab that ends its own session now says why (§171 follow-up).** A drag-and-drop upload has been
+  reported as sending a tab back to the target list, which only happens when the session genuinely
+  ends — and all five ways that can happen arrived at the screen as the same silent event, including
+  the two that mean opposite things ("you asked to disconnect" and "the command channel closed under
+  you"). Each now names itself. **This changes nothing you can see:** the release binary has no
+  console, so the reasons are readable only in a debug build, and the bug itself is still open.
+
+### Under the hood
+
+- 43 dependency updates, no requirement changed. russh-sftp moved a major version and needed no
+  code change at all; `age` and `base64` were each re-tested and deliberately held, with the reasons
+  rewritten because both had gone stale (§172).
+- Nothing about your files changed. The vault stayed on age 0.11, so `secrets.age` keeps its exact
+  format — saved credentials open with the same master passphrase, with no migration and nothing to
+  re-enter. `known_hosts`, `targets.json` and the settings file are untouched.
+
+## 4.0.0 — 2026-09-09
 
 140 sections and 375 commits on from 3.0.0. The headline is that cmote stopped being only an SSH
 client — it opens a **local** shell too — and that the terminal itself went from "good enough" to
