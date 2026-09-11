@@ -458,6 +458,19 @@ async fn connect_and_run(
 		// time and must not be dropped for being quiet.
 		inactivity_timeout: None,
 		preferred: compressed_preferences(),
+		// TCP_NODELAY on the session socket, i.e. Nagle's algorithm off (PLAN §172). russh
+		// defaults this to false, and the default is wrong for everything cmote does with the
+		// socket. Nagle holds a small write back until the previous one is acknowledged, so it
+		// coalesces — and on an interactive terminal the small writes are the KEYSTROKES, each
+		// one a packet of a few bytes that must leave now, not when the next one shows up. The
+		// echo people feel as a laggy connection is that wait. It costs the same on the sftp
+		// side, where a listing is a handful of small requests, and russh-sftp's own benchmark
+		// names it as a required setting to reach the numbers it quotes.
+		//
+		// This is the setting OpenSSH and PuTTY both make for an interactive session, PuTTY by
+		// a checkbox that ships ticked. The one thing traded away is a marginally worse packet
+		// count on a link that is already dominated by SSH's own per-packet framing and MAC.
+		nodelay: true,
 		..Default::default()
 	});
 
