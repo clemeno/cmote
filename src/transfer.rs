@@ -704,12 +704,28 @@ impl Queue {
 		// its two kinds here — both go, one after the other, through the single slot.
 		let (folders, files): (Vec<PathBuf>, Vec<PathBuf>) =
 			dropped.into_iter().partition(|path| path.is_dir());
-		match drop_outcome(
+		// Said out loud, because the other half of this timeline already is. Every session ending
+		// names itself on stderr (`ssh::client`, `local::session`), and the bug those were added
+		// for is occasional — so a tab that goes home minutes into a session is otherwise tied
+		// back to a drop, or cleared of one, from memory. This is the line that settles it, and it
+		// carries the drop's SIZE because one file and thirty are not the same test: a batch is
+		// one destination pre-scan plus one upload per file, so thirty files is thirty-one channel
+		// opens from a single gesture.
+		//
+		// Exactly one line per drop. `dropped` was taken above, so the frames subscription that
+		// raises `FileDropSettled` finds it empty and returns before reaching here.
+		let outcome = drop_outcome(
 			connected,
 			self.busy(),
 			folders.len() + files.len(),
 			pane_dir,
-		) {
+		);
+		eprintln!(
+			"drop settled: {} file(s), {} folder(s) -> {outcome:?}",
+			files.len(),
+			folders.len()
+		);
+		match outcome {
 			// No session (or not the terminal screen): nowhere to send, so say nothing.
 			DropOutcome::Ignore => Effects::default(),
 			DropOutcome::Busy => {
