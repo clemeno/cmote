@@ -20303,3 +20303,131 @@ that lets the next reader think about it too. The version worth having names the
 exposure, why no cheaper version exists, and what would change it — and if the honest answer is "the
 trigger is upstream", that is a fine thing to write, because it tells the reader where to look rather
 than implying the work is theirs.
+
+## §172 — Every dependency asked again: one major taken, two holds re-proved, and a socket option nobody had set
+
+A full dependency sweep, which means asking each of the 21 direct dependencies what the newest
+version is rather than trusting the requirement written beside it. `cargo-outdated` is not installed
+and `cargo update --breaking` is nightly-only, so the answer came from crates.io's API per crate.
+
+**Eighteen of the 21 were already at their newest version.** The other three — `age`, `base64`,
+`russh-sftp` — each had a semver-incompatible release out, and each was already the subject of a
+written note in `Cargo.toml`. So the sweep was mostly a test of those notes, and two of the three
+turned out to be arguing from a dependency graph that had moved.
+
+`cargo update` took **43 compatible bumps** with nothing held back, which changed no requirement and
+no line of `src/`. Three are worth naming. russh 0.63.1 → 0.63.3 dropped its vendored
+`internal-russh-num-bigint` for `num-bigint 0.5` — one crate fewer to compile and one fewer fork of
+an arithmetic library in the crypto path. flate2 gained a `zlib-rs` backend that is in the lock but
+**not in this target's graph**, so §11's no-C-toolchain promise is untouched; `cargo tree -i zlib-rs`
+prints nothing, which is the check. And plist moved to `quick-xml 0.42`, which is what broke the
+`base64` note.
+
+### The major that could be taken cost nothing
+
+**russh-sftp 3.0 needed no refactor at all**, and the reason it needed none is the reason it pays
+off. The break is two fields added to `client::Config` — `max_concurrent_reads` and
+`max_write_packet_len` — and cmote never builds a `Config`: every session in the tree is
+`SftpSession::new` or `RawSftpSession::new`, so it takes `Config::default()`. Zero lines changed, no
+crate entered or left the graph (`gloo-timers` and `wasm-bindgen-futures` are wasm-target-gated), and
+`russh` is only a *dev* dependency of 3.0, so there was no version chain to follow.
+
+What arrives with the new defaults is on the read side. 2.4 pipelined writes and nothing else, 8
+deep. 3.0 pipelines **reads sixteen deep**, and a download in `download.rs` or a remote open in
+`edit.rs` is a `File::read` loop — which in 2.4 meant one request per chunk and a full round-trip of
+waiting for it. On a link where latency is the cost, that *was* the cost. Writes go 8 → 16, and 3.0's
+preferred write framing is 32 KiB: the exact `CHUNK` both `upload.rs` and `download.rs` have always
+used, so the loop now hands the crate the packet size it wants to send. Upstream's benchmark puts 3.0
+level with Go's `pkg/sftp` and Node's `ssh2`.
+
+`new_with_config` to push concurrency past 16 was **not** taken. The defaults are where upstream's
+measurements landed, cmote has no measurement of its own to argue with them, and a knob nobody has
+needed is a knob to get wrong.
+
+### A hold can outlive the reason written under it
+
+**age 0.12 is still blocked, and not for the reason §142 recorded.** That note blamed `ml-kem 0.2.1`,
+published against `kem 0.3.0-pre.0` and unable to compile against the 0.3.0 that shipped. `ml-kem`
+0.2.2 (Jan 2026) and 0.2.3 (Feb 2026) have since **fixed that compile** — and pinned
+`kem = "=0.3.0-pre.0"` exactly. A caret range excludes pre-releases, so that pin and russh's `^0.3`
+have an *empty intersection*, and cargo cannot choose either fixed version at all.
+
+What it does instead is the part worth keeping: it **backtracks in silence** to 0.2.1, the only 0.2 a
+unified `kem 0.3.0` satisfies, and the build dies with 18 trait errors inside a crate that is not
+ours and no mention anywhere of the conflict that caused it. A resolver that cannot satisfy two
+requirements does not say so; it picks an older version and lets the compiler fail somewhere else.
+
+So the hold stands, and it now lifts on **either** of two events instead of one: age taking
+`ml-kem 0.3`, or any `ml-kem 0.2.x` whose `kem` requirement is a range rather than a pin. Had the
+note merely been re-read rather than re-tested, the stale reason would have been copied forward and
+the second trigger would not exist. The retry itself is one line and one `cargo check --all-targets`.
+
+**`base64` lost half its argument the same way.** The note said `alacritty_terminal` *and* `plist`
+both required `^0.22.0`, so asking for 0.23 would add a second base64 rather than upgrade anything.
+plist 1.10.1 moved to 0.23 on its own in this very sweep, so the second copy is now in the graph
+whatever we ask for, and cmote's line can no longer add or remove one. The half that was load-bearing
+survives: the bytes cmote decodes came off the stream `alacritty_terminal` parsed, that crate still
+requires `^0.22.0`, and decoding with the same crate as the engine beside us is the version that
+cannot skew. Same decision, honest reason, no code change — and none was available.
+
+### The finding that was not on the list
+
+Reading russh-sftp 3.0's README for what the major changed turned up a sentence about `TCP_NODELAY`
+being required to reach the throughput it quotes. **russh defaults `nodelay` to false, so Nagle's
+algorithm has been on for every cmote session since the first one.**
+
+Nagle holds a small write back until the previous one is acknowledged, so as to coalesce it with
+whatever comes next. On an interactive terminal the small writes **are the keystrokes** — one packet
+of a few bytes each, with nothing to coalesce with and nothing to wait for. The echo delay people
+read as a laggy connection is that wait. It costs the same on the sftp side, where a listing is a
+handful of small requests. OpenSSH and PuTTY both make this setting for an interactive session,
+PuTTY by a checkbox that ships ticked.
+
+One field, one place — `client::Config` is constructed exactly once in the tree. And the honest part:
+**this knob is not new.** russh has had it since before 0.63.1, so the dependency update did not
+unlock it; reading the release notes of something else is what surfaced it. No test, either: the
+behaviour lives in russh and the kernel, cmote's side is a struct field, and `..Default::default()`
+means a renamed or removed field fails the build rather than going quiet.
+
+### Two things checked rather than assumed
+
+**iced's file-drop event still carries no pointer position.** `iced_core`'s
+`window::Event::FileDropped(PathBuf)` is unchanged at 0.14, so §16's deferral on aiming a drop at a
+specific folder stands — checked, because `iced_widget` and `iced_tiny_skia` both took patch releases
+in this sweep and a deferral whose blocker may have been fixed is worth ten seconds of grep.
+
+**And `deny.toml` promised a warning the tool now denies.** Its advisories note said the defaults
+"deny known vulnerabilities, warn on unmaintained", and sent the reader to a bare `cargo deny check`
+on that basis. cargo-deny 0.20 denies unmaintained, so that check fails with six errors on a tree CI
+is perfectly happy with. Corrected, with the two verdicts told apart: CI runs
+`cargo deny check bans licenses sources` for policy and `cargo audit` with `ci.yml`'s three ignores
+for advisories, and there the four unmaintained/unsound crates the tree carries transitively —
+bincode, proc-macro-error2, yaml-rust, lru — are tolerated warnings, with only a new vulnerability
+failing. Verified after the sweep: `bans ok, licenses ok, sources ok`, and `cargo audit` exits 0 with
+"4 allowed warnings found". `ignore = []` stays empty.
+
+**And the release build, because §171 is right that a lock change is what decides it.** Six gate steps
+green — check, 1831 tests, clippy `-D warnings`, doc, fmt — then `cargo metadata --locked` exit 0 and
+`cargo build --release --locked` exit 0 in 8m 17s for a 17.3 MB `cmote.exe`. The `--locked` run is
+the one that matters here: it proves the committed lock resolves without cargo being allowed to
+change it, which is exactly what the release workflow will ask of it.
+
+### What to keep
+
+**A hold outlives the reason written under it.** `age` is still held and every clause of the
+explanation had expired: the crate it blamed was fixed twice over, and the block moved from a compile
+error to a resolver conflict with a different trigger. Re-reading a note confirms the conclusion and
+cannot check the premise. Only re-running it can, and here that was one line and one command.
+
+**Cargo does not report a conflict it can avoid.** Faced with `=0.3.0-pre.0` against `^0.3` it
+silently selects an older, non-compiling version and lets rustc fail in someone else's crate. So "the
+build is broken in a dependency" and "two of my requirements are unsatisfiable" look identical, and
+the second cannot be read off the error. Worth knowing before spending an hour on 18 trait errors.
+
+**The upgrade that costs nothing to take is worth reading anyway.** russh-sftp 3.0 needed zero lines
+*because* cmote never builds a `Config` — and that same fact is precisely why sixteen-deep read
+pipelining arrived for free. A silent diff is not a silent change.
+
+**The best finding came from a README, not a diff.** Nagle had been on since v1; no version bump
+unlocked turning it off and no compiler error was ever going to mention it. Reading what a release
+says it changed, rather than only what the compiler says you must change, is what found it.
