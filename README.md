@@ -743,9 +743,13 @@ So always start from the tag:
 3. Tag the release commit and push — **this is what fires the workflow**:
 
    ```sh
-   git tag -a 4.0.0 -m "cmote 4.0.0"
-   git push origin 4.0.0
+   git tag -a <version> -m "cmote <version>"
+   git push origin <version>
    ```
+
+   `<version>` is the one in `Cargo.toml` — written as a placeholder rather than a worked example
+   on purpose, because a concrete version here is a line that is wrong for every release but one,
+   and step 1 is the step it would quietly undo.
 
 4. The workflow builds both targets and opens a **draft** Release with the three assets above.
 5. Review the draft — confirm the assets are attached and edit the notes — then **Publish**.
