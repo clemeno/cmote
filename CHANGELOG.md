@@ -11,7 +11,7 @@ itself — the one the tag will point at — rather than added afterwards. 4.0.0
 "unreleased" in the tree its own tag names, because filling the date in later is a step that
 happens after the only moment anyone is looking.
 
-## 4.0.2 — unreleased
+## 4.0.2 — 2026-09-11
 
 ### Fixed
 
