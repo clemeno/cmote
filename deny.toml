@@ -24,8 +24,17 @@ targets = [
 
 # ── Advisories ────────────────────────────────────────────────────────────────
 # RustSec advisory database. CI gates advisories through `cargo audit`, so this
-# section only matters if someone runs a bare `cargo deny check` locally; the
-# defaults (deny known vulnerabilities, warn on unmaintained) are what we want.
+# section only matters if someone runs a bare `cargo deny check` locally.
+#
+# It will FAIL there, and that is not a broken tree (PLAN §172). cargo-deny used to
+# warn on `unmaintained` and now denies it, so a bare check reports the four
+# unmaintained/unsound crates the tree carries transitively — bincode,
+# proc-macro-error2, yaml-rust, lru — as errors, plus `rsa`'s Marvin advisory. CI's
+# verdict is the one that counts: `cargo deny check bans licenses sources` for policy,
+# and `cargo audit` with the three ignores named in `ci.yml` for advisories, where the
+# same four are tolerated warnings and only a NEW vulnerability fails. Run those two if
+# you want CI's answer; run the bare check to see everything, including what is merely
+# unmaintained.
 [advisories]
 version = 2
 yanked = "deny"       # refuse a build pinned to a yanked crate version
