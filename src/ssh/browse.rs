@@ -319,9 +319,30 @@ const READDIR_WINDOW: usize = 32;
 /// it does anything with it. That is the TREE: it has to know which children are folders, and a
 /// half-read listing would show a branch as childless.
 ///
-/// This is what `SftpSession::read_dir` does, minus the two things it discards: the
-/// `longname` line the owner and group names live in, and `.`/`..`, which the model
-/// drops at ingest anyway (`explorer::is_dot_link`, §19).
+/// This is what `SftpSession::read_dir` does, minus the one thing it discards: the `longname` line
+/// the owner and group names live in.
+///
+/// `.` and `..` are dropped here, and this doc used to say they were kept because "the model drops
+/// them at ingest anyway" (`explorer::is_dot_link`, §19). That was true of the two callers who feed
+/// a MODEL — the pane and the tree both filter on the way in — and false of the one that does not.
+/// `remove_subtree` reads this list raw and treats every directory in it as a child to descend and
+/// then remove, so `.` had it re-reading the folder it was already in, and `..` had it walking OUT
+/// of the folder the user asked to delete: `join` does not normalise, so the child is the literal
+/// `"/dir/.."`, which the SERVER resolves to the parent. The walk then climbed, listing one level up
+/// each time, until a path outgrew the server's limit and came back "no such file" — which aborted
+/// the delete before it removed anything, and is the error a user saw.
+///
+/// It is filtered HERE rather than in `remove_subtree` because the danger is not the error. Had the
+/// walk ever terminated, `files` would have held names from the folders above the one being deleted,
+/// and the removal loop would have unlinked them. So the rule belongs where the names are read, not
+/// at one of the places they are used — a caller that forgets this filter deletes someone else's
+/// files, which is not a mistake to leave available. No caller wants dot links: the three that
+/// filter them today (`files`, `explorer`, `download`) keep doing so, since the local backend feeds
+/// them too.
+///
+/// Not filtered in `stream_names`, which this wraps: that loop reads an empty wave as "this server
+/// never sends EOF" (§167), and removing names before that check would let a directory holding only
+/// `.` and `..` be mistaken for one whose server is broken.
 async fn read_names<W: Walk + Send + Sync + 'static>(
 	sftp: &Arc<W>,
 	path: &str,
@@ -329,7 +350,10 @@ async fn read_names<W: Walk + Send + Sync + 'static>(
 	let (producer, mut landing) = spawn_walk(sftp, path);
 	let mut files = Vec::new();
 	while let Some(wave) = landing.recv().await {
-		files.extend(wave);
+		files.extend(
+			wave.into_iter()
+				.filter(|entry| !crate::explorer::is_dot_link(&entry.filename)),
+		);
 	}
 	finish(producer, path).await?;
 	Ok(files)
@@ -991,11 +1015,18 @@ impl Steps {
 			.iter()
 			.map(|(path, names)| ((*path).to_owned(), names.to_vec()))
 			.collect();
+		// `.` and `..` are listed by a real server but do not keep a directory from being removed,
+		// so they are not seeded as things inside it — seeding them would have `rmdir` refuse
+		// every folder forever, which is a fake failing where no server does.
 		let present = tree
 			.iter()
 			.flat_map(|(path, names)| {
-				std::iter::once(path.clone())
-					.chain(names.iter().map(|name| join(path, &name.filename)))
+				std::iter::once(path.clone()).chain(
+					names
+						.iter()
+						.filter(|name| !crate::explorer::is_dot_link(&name.filename))
+						.map(|name| join(path, &name.filename)),
+				)
 			})
 			.collect();
 		Self {
@@ -1599,6 +1630,47 @@ mod walk_tests {
 			steps.arguments("rmdir"),
 			vec!["/p".to_owned()],
 			"one folder was here to remove, whatever the link points at"
+		);
+	}
+
+	/// A real server lists `.` and `..` inside every directory — OpenSSH's `sftp-server` does, which
+	/// is why three other places in this codebase filter them at ingest. The fake above did not
+	/// list them, and that is the whole reason this shipped broken: every delete test passed against
+	/// a directory more polite than any real one.
+	///
+	/// Both are directories, so an unfiltered walk took them for children. `.` had it re-read the
+	/// folder it was already in. `..` was worse: `join` does not normalise, so the child is the
+	/// literal `"/p/.."`, which a server resolves to the PARENT — the walk climbed out of the folder
+	/// it had been asked to empty, listing one level up each time until a path outgrew the server's
+	/// limit and came back "no such file".
+	///
+	/// What is asserted is CONTAINMENT, not the error. The error was the symptom and, in a sense,
+	/// the reprieve: the removal loop runs only after the walk finishes, so a walk that could never
+	/// finish never removed anything. A walk that did finish would have held names from the folders
+	/// ABOVE this one in `files`, and unlinked them.
+	#[tokio::test]
+	async fn dot_and_dotdot_are_not_children_to_descend_into_or_remove() {
+		let steps = Arc::new(Steps::tree(&[(
+			"/p",
+			&[dir_file("."), dir_file(".."), plain_file("keep.txt")],
+		)]));
+
+		remove_subtree(&steps, "/p").await.expect("the folder went");
+
+		assert_eq!(
+			steps.arguments("rmdir"),
+			vec!["/p".to_owned()],
+			"the folder itself, and NOT `/p/.` — nor, above all, `/p/..`, which is its parent"
+		);
+		assert_eq!(
+			steps.arguments("remove"),
+			vec!["/p/keep.txt".to_owned()],
+			"the one real name inside it"
+		);
+		assert_eq!(
+			steps.counted("opendir"),
+			1,
+			"read once: `.` would have had it read again, and `..` would have read its parent"
 		);
 	}
 
