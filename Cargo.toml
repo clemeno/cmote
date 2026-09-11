@@ -52,15 +52,24 @@ pedantic = "deny"
 # format is needed. Its `secrecy` re-export (`age::secrecy`) carries the master passphrase into
 # the API without a plaintext copy lingering.
 #
-# HELD at 0.11 while 0.12.1 is out (PLAN §142), and not by preference — 0.12 cannot be RESOLVED
-# alongside russh. age 0.12 adds post-quantum recipients and so takes `ml-kem 0.2`, russh takes
-# `ml-kem 0.3`, and both depend on the same `kem` crate, which cargo therefore unifies to one
-# version. `ml-kem 0.2.1` was published against `kem 0.3.0-pre.0` and does not compile against the
-# 0.3.0 that shipped, so the unified graph fails to build in a crate that is not ours; pinning `kem`
-# back to the pre-release is refused because `ml-kem 0.3`'s `^0.3` does not match a pre-release.
-# There is no feature to turn the post-quantum path off — `ml-kem` is a hard dependency of age 0.12,
-# and cmote seals with scrypt alone, so it would be weight and parser surface for a recipient type
-# the vault never uses. Revisit when age moves to `ml-kem 0.3`. One knock-on: age 0.11's
+# HELD at 0.11 while 0.12.1 is out (PLAN §142, re-tested §172), and not by preference — 0.12 cannot
+# be RESOLVED alongside russh. age 0.12 adds post-quantum recipients and so takes `ml-kem 0.2`, russh
+# takes `ml-kem 0.3`, and both depend on the same `kem` crate, which cargo therefore unifies to one
+# version. There is no feature to turn the post-quantum path off — `ml-kem` is a hard dependency of
+# age 0.12 — and cmote seals with scrypt alone, so it would be weight and parser surface for a
+# recipient type the vault never uses.
+#
+# §142 blamed `ml-kem 0.2.1`, published against `kem 0.3.0-pre.0` and not compiling against the 0.3.0
+# that shipped. That is still what FAILS, but it is no longer why: 0.2.2 (Jan 2026) and 0.2.3 (Feb
+# 2026) fixed the compile, and both pin `kem = "=0.3.0-pre.0"` — an EXACT requirement, whose
+# intersection with russh's `^0.3` is empty, because a caret range excludes pre-releases. So cargo
+# cannot choose either fixed version at all; it backtracks in silence to 0.2.1, the only 0.2 whose
+# `^0.3.0-pre.0` a unified `kem 0.3.0` satisfies, and the build dies in a crate that is not ours with
+# 18 trait errors. Retried on 2026-09-11 by moving this line to 0.12 and running
+# `cargo check --all-targets`; that is the failure it gives.
+#
+# Two things would lift it, either one on its own: age taking `ml-kem 0.3`, or an `ml-kem 0.2.x`
+# whose `kem` requirement is a range rather than a pin. One knock-on meanwhile: age 0.11's
 # `i18n-embed-fl` pulls `proc-macro-error2`, which is what `cargo build`'s future-incompatibility
 # note is about — upstream's to fix, and 0.12 already has.
 age = { version = "0.11", default-features = false }
