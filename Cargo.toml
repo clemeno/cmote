@@ -207,7 +207,16 @@ portable-pty = "0.9"
 russh = { version = "0.63.1", default-features = false, features = ["ring", "flate2", "rsa"] }
 # The sftp subsystem, used to upload a local file over its own channel (PLAN §17). It
 # rides on russh's `ChannelStream`, so it adds a protocol — not a second SSH stack.
-russh-sftp = "2.4.0"
+#
+# 3.0 (PLAN §172) is a major that cmote answered with nothing, because the break is two fields added
+# to `client::Config` — `max_concurrent_reads` and `max_write_packet_len` — and cmote never builds
+# one: every session here is `SftpSession::new` / `RawSftpSession::new`, i.e. `Config::default()`. So
+# the new defaults simply apply. Two are worth naming. Reads now pipeline SIXTEEN requests where 2.4
+# pipelined none at all (writes alone were concurrent, and only 8), which is the whole difference on
+# a link whose round-trip is the cost — a download was one request per chunk and a wait for it. And
+# the preferred write framing is 32 KiB, the exact `CHUNK` both `upload.rs` and `download.rs` already
+# read and write in, so our loop hands the crate the packet size it wants to send.
+russh-sftp = "3.0.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 # `fs` = async local file I/O, so streaming an upload never blocks a runtime worker.
