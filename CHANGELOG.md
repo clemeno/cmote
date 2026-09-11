@@ -26,13 +26,27 @@ throughput — so the further away the machine you are working on, the more of i
   to coalesce with — so each one waited for a round-trip that bought nothing. `TCP_NODELAY` is set
   now, which is what OpenSSH and PuTTY both do for an interactive session.
 - **Downloads and remote file opens stop waiting between chunks (§172).** Reading a remote file
-  used to be one 32 KiB request, a full round-trip of waiting, then the next; sixteen are in flight
-  at once now, which came with russh-sftp 3.0. Uploads gain less — they were already pipelined,
-  eight deep, and are now sixteen.
+  used to be one 32 KiB request, a full round-trip of waiting, then the next — so a download could
+  never go faster than **32 KiB per round-trip**, no matter how much bandwidth was there. Two things
+  changed with russh-sftp 3.0: the request size is no longer whatever buffer cmote happened to pass
+  (32 KiB) but what the connection allows (about 256 KiB), and sixteen of them are in flight at
+  once. The ceiling becomes roughly **4 MiB per round-trip** — on a 50 ms link, about 0.65 MB/s
+  before and about 84 MB/s now, which is to say the download is finally limited by the connection
+  instead of by the waiting. Uploads gain less: they were already pipelined, eight deep, now sixteen.
 
-Both are unmeasured on a real link: the pipelining depth is what the library does and the Nagle
-change is well-understood for interactive SSH, but no before-and-after was timed against a remote
-host. On a LAN, expect to notice neither.
+Where the two land differs, so it is worth being exact rather than calling both of them "faster".
+
+The download ceilings above are **arithmetic, not a benchmark** — request size times depth, divided
+by the round-trip. A real transfer also pays for the disk, the cipher and the server, so treat them
+as the limit that was removed rather than a speed promised. Nothing here was timed against a real
+host. But the removal is large enough that it applies on a fast network too: even at 1 ms, the old
+32 KiB-per-round-trip ceiling was about 33 MB/s, already under gigabit.
+
+The typing change is smaller than it sounds, and in the other direction. Nagle only holds a write
+back while an earlier one is still unacknowledged, so an isolated keystroke after a pause was never
+delayed — what was delayed is typing *faster* than the round-trip, which then reached the far end in
+clumps instead of one character at a time. So this is about echo becoming even rather than becoming
+quicker, it grows with distance, and on a LAN there is nothing there to win.
 
 ### Fixed
 

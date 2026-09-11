@@ -20340,6 +20340,24 @@ preferred write framing is 32 KiB: the exact `CHUNK` both `upload.rs` and `downl
 used, so the loop now hands the crate the packet size it wants to send. Upstream's benchmark puts 3.0
 level with Go's `pkg/sftp` and Node's `ssh2`.
 
+**The depth turned out to be half of it, which reading the source said and the release notes did
+not.** 2.4's `poll_read` builds one future, awaits it, clears it — strictly one request outstanding —
+and sizes it `min(buf.remaining(), max_read_len)`, so the request was **whatever buffer cmote
+passed**: `CHUNK`, 32 KiB. 3.0 reads into a `ReadState` of its own and hands the caller slices out of
+it, so the caller's buffer no longer sizes anything on the wire: `request()` asks for
+`max_packet_len - 13` ≈ **256 KiB**, and after one probe request — `count = 1` until `chunk_len` is
+known, so the server's real read size is learned rather than assumed — tops the queue up to
+`max_concurrent_reads`.
+
+So the ceiling on a download goes from **32 KiB per round-trip** to about **4 MiB per round-trip**,
+which is ~128× and not the 16× the depth alone suggests. Arithmetic, not a benchmark. Two things
+follow that the first write-up of this got wrong. A download was latency-bound on *any* real network,
+not just a distant one — 32 KiB at 1 ms is ~33 MB/s, already under gigabit — so the CHANGELOG's
+"expect to notice neither on a LAN" was true of the Nagle change and false of this one. And the two
+speedups are not the same size or the same shape: Nagle only ever delayed typing *faster* than the
+round-trip, since it withholds a write only while an earlier one is unacknowledged, so its effect is
+echo that is even rather than echo that is quicker.
+
 `new_with_config` to push concurrency past 16 was **not** taken. The defaults are where upstream's
 measurements landed, cmote has no measurement of its own to argue with them, and a knob nobody has
 needed is a knob to get wrong.
