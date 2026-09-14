@@ -129,8 +129,7 @@ impl Tab {
 			&& matches!(key, iced::keyboard::Key::Character(character)
 				if character.as_str().eq_ignore_ascii_case("f"))
 		{
-			self.panes.pane.open_filter();
-			return iced::widget::operation::focus(ui::files::FILTER_INPUT_ID);
+			return self.open_pane_filter();
 		}
 
 		let iced::keyboard::Key::Named(named) = key else {
@@ -576,6 +575,21 @@ impl Tab {
 		self.send_fetches(fetches);
 	}
 
+	/// Open the pane's name filter and put the cursor in it (§174) — Ctrl+F, and the header's
+	/// magnify button when the bar is down.
+	///
+	/// The focus move is what makes the MOUSE path land in the same state as the keyboard one. A
+	/// press on a header button is swallowed by that button, so it never reaches the pane's own
+	/// `mouse_area` and never gives the pane the keyboard; without this line, Enter in the field
+	/// would release the claim and hand the arrows to whatever had the ring before — the shell —
+	/// so the rows the user had just narrowed to could not be walked. Pressing Ctrl+F already
+	/// requires the pane to be focused, so there it is a no-op.
+	fn open_pane_filter(&mut self) -> iced::Task<Message> {
+		self.focus_pane(Focus::Files);
+		self.panes.pane.open_filter();
+		iced::widget::operation::focus(ui::files::FILTER_INPUT_ID)
+	}
+
 	/// Browse the files pane into a directory (§19): a double-clicked folder, the toolbar's
 	/// "up" button, or Enter on the keyboard. This points the PANE only — the console stays
 	/// put, so you can look inside a folder you are not in without disturbing the shell. The
@@ -777,7 +791,18 @@ impl Tab {
 				return self.scroll_files_into_view();
 			}
 			FilesMessage::FilterSubmitted => self.panes.pane.stop_filter_typing(),
-			FilesMessage::FilterClosed => self.panes.pane.close_filter(),
+			// The header's magnify button, which is live whether or not the bar is up (§174): the
+			// mouse's way in AND out, where the keyboard has Ctrl+F to open and Esc to clear.
+			// Ctrl+F deliberately does NOT toggle — pressed again it takes the field back, keeping
+			// what is in it, the way a browser's find does — so the two are different actions and
+			// only the opening half is shared.
+			FilesMessage::FilterToggled => {
+				if self.panes.pane.filter().is_some() {
+					self.panes.pane.close_filter();
+				} else {
+					return self.open_pane_filter();
+				}
+			}
 			FilesMessage::Refresh => {
 				self.panes.pane.close_menu();
 				if let Some(request) = self.panes.pane.refresh() {

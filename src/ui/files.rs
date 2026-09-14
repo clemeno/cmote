@@ -111,15 +111,18 @@ pub const HEADER_HEIGHT: f32 = 28.0;
 /// item count and the `.*` toggle share it — so the path stays on ONE line (a line this wide
 /// holds a long path) and is trimmed with `…` to fit rather than wrapping and shoving those
 /// controls around. `HEADER_CONTROLS_WIDTH` is the room those controls and their gaps take
-/// beside the path (the up and copy buttons, the item count, the refresh and sort buttons and the
-/// `.*` toggle); `HEADER_CHAR` is a glyph advance at `TEXT_SIZE`.
+/// beside the path (the up and copy buttons, the item count, the magnify, refresh and sort buttons
+/// and the `.*` toggle); `HEADER_CHAR` is a glyph advance at `TEXT_SIZE`.
+///
+/// The magnify button (§174) is counted here rather than in `FILTER_WIDTH` because it is in the
+/// header whether the filter bar is up or not — only the FIELD comes and goes.
 ///
 /// Both are deliberately PESSIMISTIC — a fatter glyph and more control room than the face and
 /// toolbar truly take — so the char budget lands under what the line really holds and the `…`
 /// always trims the path with margin to spare, never a hair too late. The trade is a path cut
 /// a little sooner than strictly needed; containment wins. (The same all-wide-glyph tolerance
 /// the grid notes still holds — a line of all `W`s is the one input an average cannot bound.)
-const HEADER_CONTROLS_WIDTH: f32 = 268.0;
+const HEADER_CONTROLS_WIDTH: f32 = 292.0;
 const HEADER_CHAR: f32 = 8.0;
 
 /// The rubber band's fill and edge (§21). Translucent, so the cells it is being dragged
@@ -154,10 +157,11 @@ const COLLAPSE_GLYPH: char = '\u{e5d6}';
 /// Material Icons' `sort`: the header button that drops the sort menu (§19). Lit (foreground) when
 /// a sort is in effect, dimmed like a disabled control when the grid is in its default order.
 const SORT_GLYPH: char = '\u{e164}';
-/// Material Icons' `search` and `close`: the name filter's own two glyphs (§174) — the first a
-/// label in front of the field, the second the button that drops the pattern and shuts the bar.
+/// Material Icons' `search`: the header button that opens the name filter, and shuts it again
+/// (§174). Always in the header, whether the bar is up or not — it is the mouse's whole way in and
+/// out, where the keyboard has Ctrl+F and Esc. Lit while a pattern is in force, dimmed otherwise,
+/// the same lit-or-dimmed trick the sort button beside it uses to say whether it is doing anything.
 const SEARCH_GLYPH: char = '\u{e8b6}';
-const CLOSE_GLYPH: char = '\u{e5cd}';
 const HEADER_ICON_SIZE: f32 = 16.0;
 
 /// The name filter, drawn INSIDE the header row rather than as a bar of its own (§174).
@@ -169,9 +173,11 @@ const HEADER_ICON_SIZE: f32 = 16.0;
 /// header has room: the path and the item count are the two flexible items in it, and the field
 /// takes some of the path's.
 ///
-/// `FILTER_WIDTH` is what the field occupies, subtracted from the path's ellipsis budget while the
+/// `FILTER_WIDTH` is what the FIELD occupies, subtracted from the path's ellipsis budget while the
 /// bar is up so the folder never stops being named — the pane is showing a third of a folder, and
-/// which folder is exactly what a user needs to still read.
+/// which folder is exactly what a user needs to still read. The magnify button that opens and shuts
+/// it is not in this number: it is in the header permanently, so it is part of
+/// `HEADER_CONTROLS_WIDTH` instead.
 const FILTER_WIDTH: f32 = 180.0;
 
 /// Icon colours by category (§19). Muted enough to sit on the dark pane, distinct
@@ -451,6 +457,9 @@ fn header(files: &Files, show_hidden: bool, width: f32, shown: usize) -> Element
 					.width(Length::Fill)
 					.align_x(Horizontal::Right),
 			)
+			// Open or shut the name filter; lit while a pattern is in force (§174). Always here,
+			// so the mouse has the way in that Ctrl+F is for the keyboard.
+			.push(filter_button(files.filter().is_some()))
 			// Re-list the directory on show; the twin of the tree's header ↻ (§18, §19).
 			.push(refresh_button(Message::Files(FilesMessage::Refresh)))
 			// Drop the sort menu; lit when a non-default order is in effect (§19).
@@ -468,30 +477,50 @@ fn header(files: &Files, show_hidden: bool, width: f32, shown: usize) -> Element
 	.into()
 }
 
-/// The name filter's field, in the header while the bar is up (§174): a search glyph, what has
-/// been typed, and a ✕ that drops the pattern and shuts the bar.
+/// The name filter's field, in the header while the bar is up (§174). Just the field: the magnify
+/// button that opened it is what shuts it again, so there is no ✕ beside it — two controls doing
+/// one job is one control too many, and the button has to be in the header anyway.
 ///
 /// `on_submit` is Enter, and it does NOT close anything — it hands the keyboard back to the grid
 /// with the pattern still in force, which is the whole point of narrowing a folder: you then arrow
 /// onto one of the four names left, or Ctrl+A the lot. Esc is the one that clears, and it arrives
 /// through `KeyboardClaim::PaneFilter` rather than from here.
 fn filter_field(pattern: &str) -> Element<'_, Message> {
-	row![
+	text_input("Filter names", pattern)
+		.id(FILTER_INPUT_ID)
+		.size(TEXT_SIZE)
+		.padding(Padding::from([0.0, 4.0]))
+		.width(Length::Fixed(FILTER_WIDTH))
+		.on_input(|value| Message::Files(FilesMessage::FilterEdited(value)))
+		.on_submit(Message::Files(FilesMessage::FilterSubmitted))
+		.into()
+}
+
+/// The header's magnify button (§174): opens the name filter, and pressed again drops the pattern
+/// and puts the whole listing back. ALWAYS in the header, bar up or down — it is the only way in
+/// and out for someone using the mouse, and a control that appeared only once the thing it controls
+/// was already showing would be no way in at all.
+///
+/// Shaped like the sort button beside it, lit-or-dimmed trick included: `active` (a filter is in
+/// force) paints it foreground, no filter leaves it muted. So the toolbar says at a glance whether
+/// the grid is showing the whole folder or a part of it — the same question the item count answers
+/// in numbers.
+fn filter_button(active: bool) -> Element<'static, Message> {
+	button(
 		text(SEARCH_GLYPH.to_string())
 			.font(ICON_FONT)
 			.size(HEADER_ICON_SIZE)
-			.color(MUTED_FG),
-		text_input("Filter names", pattern)
-			.id(FILTER_INPUT_ID)
-			.size(TEXT_SIZE)
-			.padding(Padding::from([0.0, 4.0]))
-			.width(Length::Fixed(FILTER_WIDTH))
-			.on_input(|value| Message::Files(FilesMessage::FilterEdited(value)))
-			.on_submit(Message::Files(FilesMessage::FilterSubmitted)),
-		header_icon_button(CLOSE_GLYPH, Message::Files(FilesMessage::FilterClosed)),
-	]
-	.spacing(4)
-	.align_y(Vertical::Center)
+			.color(if active { FG } else { MUTED_FG }),
+	)
+	.padding(Padding::from([0.0, 4.0]))
+	.style(|_theme, status| button::Style {
+		background: match status {
+			button::Status::Hovered | button::Status::Pressed => Some(SELECTED_BG.into()),
+			_ => None,
+		},
+		..button::Style::default()
+	})
+	.on_press(Message::Files(FilesMessage::FilterToggled))
 	.into()
 }
 

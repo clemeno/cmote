@@ -8157,6 +8157,38 @@ mod tests {
 		);
 	}
 
+	/// The header's magnify button is the mouse's whole way in and out (§174): it toggles, and it
+	/// is live whether the bar is up or down — a control that only appeared once the thing it
+	/// controls was already showing would be no way in at all.
+	///
+	/// It also takes the keyboard to the PANE, which Ctrl+F never has to: a press on a header
+	/// button is swallowed by that button and never reaches the pane's own `mouse_area`, so without
+	/// it Enter would release the claim and hand the arrows back to the shell — leaving the rows
+	/// just narrowed to unwalkable.
+	#[test]
+	fn the_magnify_button_opens_and_shuts_the_filter_for_the_mouse() {
+		let (mut app, _rx) = app_with_terminal(16);
+		app.focus = Focus::Terminal;
+
+		let _ = app.on_files(FilesMessage::FilterToggled);
+		assert_eq!(app.panes.pane.filter(), Some(""), "the bar came up");
+		assert_eq!(app.keyboard_claim(), Some(KeyboardClaim::PaneFilter));
+		assert_eq!(
+			app.focus,
+			Focus::Files,
+			"and the pane took the ring, so Enter hands the arrows to the GRID"
+		);
+
+		app.panes.pane.set_filter("zip".to_owned());
+		let _ = app.on_files(FilesMessage::FilterSubmitted);
+		assert_eq!(app.keyboard_claim(), None);
+		assert_eq!(app.focus, Focus::Files, "the grid is what the arrows walk");
+
+		// The same button again is the way out — the mouse's Esc.
+		let _ = app.on_files(FilesMessage::FilterToggled);
+		assert_eq!(app.panes.pane.filter(), None, "cleared and shut");
+	}
+
 	/// Esc drops the pattern and the bar together (§174), and Enter does neither — it hands the
 	/// keyboard back to the grid with the filter still in force, which is what lets the arrows and
 	/// Ctrl+A act on the rows that survived.

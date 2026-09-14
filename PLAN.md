@@ -20611,6 +20611,34 @@ Ctrl+F is readline's forward-char and belongs to the shell. Here the shell does 
 — the pane does — so the bare key is free, and it is the one every file manager and every browser has
 trained people to press. The home screen's filter box made the same argument for the same key (§49).
 
+### And the mouse gets the same two doors
+
+A magnify button sits in the header **whether the bar is up or down**, and it toggles: press it to
+open the filter, press it again to drop the pattern and put the folder back. That is the mouse's
+whole way in and out, where the keyboard has Ctrl+F and Esc.
+
+Permanently in the header is the load-bearing half. A button that appeared only once the bar was
+already showing would be no way IN at all — it could only ever be a way out — and Ctrl+F would be the
+sole entrance to a feature that is otherwise entirely visible. It is lit while a pattern is in force
+and muted otherwise, the same lit-or-dimmed trick the sort button beside it uses, so the toolbar
+answers "is this the whole folder?" at a glance as well as in numbers.
+
+There is deliberately **no ✕ on the field**. The button that opened the bar shuts it, and the button
+has to be in the header anyway; a second control doing the same job is one control too many.
+
+**Ctrl+F does not toggle**, and that asymmetry is not an oversight. Pressed again it takes the field
+back, keeping what is in it — the way a browser's find does, and the way back in after Enter handed
+the keyboard to the grid. So the two are different actions and only the opening half is shared
+(`Tab::open_pane_filter`).
+
+That shared half carries one line the keyboard path never needed: it moves the keyboard ring to the
+pane. **A press on a header button is swallowed by that button**, so it never reaches the pane's own
+`mouse_area` and never gives the pane the ring — and Enter in the field would then release the claim
+and hand the arrows back to whatever had it before, which is the shell. The rows the user had just
+narrowed to would be unwalkable, by the one route where they never touched the pane. Ctrl+F already
+requires the pane to be focused, so there the line is a no-op; the prove-it is removing it, which
+prints `left: Terminal` against `right: Files`.
+
 ### The pattern does not survive a `cd`
 
 `Files::show` drops it; `Files::refresh` keeps it. That asymmetry is deliberate and it is the one
@@ -20636,7 +20664,9 @@ filter up select the wrong cells.
 
 The header already has two flexible items in it, the path and the item count. The field takes its
 room out of the path's ellipsis budget, so the folder never stops being named — the pane is showing a
-third of a folder and which folder is exactly what still has to be readable.
+third of a folder and which folder is exactly what still has to be readable. Only the FIELD comes and
+goes that way; the magnify button is permanent, so it is counted in `HEADER_CONTROLS_WIDTH` with the
+other buttons rather than in `FILTER_WIDTH` with the thing it opens.
 
 The count earns its place here too: while a filter is in force it reads `4 of 30` rather than
 `30 items`. A pane that hides twenty-six entries and still claims thirty is worse than one that hides

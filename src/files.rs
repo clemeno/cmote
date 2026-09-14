@@ -247,9 +247,10 @@ pub enum FilesMessage {
 	/// Enter in the filter field (§174): keep the pattern, hand the keyboard to the grid, so the
 	/// arrows and Ctrl+A act on what survived.
 	FilterSubmitted,
-	/// The filter bar's ✕, and what Esc arrives as (§174): drop the pattern and put the whole
-	/// listing back.
-	FilterClosed,
+	/// The header's magnify button (§174): open the filter, or — pressed while it is already up —
+	/// drop the pattern and put the whole listing back. The mouse's half of Ctrl+F, and the whole
+	/// reason the button is in the header whether or not the bar is showing.
+	FilterToggled,
 	/// Re-list the directory on show — the refresh for a folder changed from the shell.
 	Refresh,
 	/// Menu "Copy name" / "Copy relative path" / "Copy full path".
