@@ -20540,3 +20540,136 @@ found.
 **"It errors every time" and "it is safe" are different claims.** This one failed loudly and
 consistently, which reads like a harmless bug. The failure was a path-length accident on the way to a
 removal loop already holding the wrong names.
+
+## §174 — Ctrl+F in the files pane: the folder narrows to what you typed, and the names say why
+
+The files pane shows a folder. A folder can hold 237,173 entries (§166), and the way to find one in
+it was to scroll. Ctrl+F now filters the pane by name: what does not match is masked, and what does
+is drawn with the matching part lit.
+
+Two halves, and the second is not decoration. A pane hiding twenty-six of thirty names has to say
+which rule kept the four — otherwise the user is reading a folder that is quietly not the folder.
+
+### The rule was already written
+
+`glob::matches` (§49) is the home screen's filter box: a fragment until a `*` or `?` is typed, then
+a whole-name glob, case-insensitive throughout. It is exactly the rule a file grid wants, and it was
+already argued, already tested, and already the one the user has learned on the other screen.
+
+So nothing was invented. What was ADDED is the narrower question the home screen never asked —
+`glob::match_range`, WHERE it matched — because the highlight needs a span where the mask only needed
+a yes. Both live in the same module and the glob half delegates to `matches`, which is the point: a
+highlight computed by a second rule could point at a part of the name that is not the part the mask
+kept the row for, and nobody would ever notice it was lying.
+
+`match_range` is longer than it looks like it should be, and the length is one sentence of
+justification: **the range indexes the original text, not a lowercased copy of it.** Lowercasing is
+not length-preserving — `İ` (U+0130) lowercases to two chars — so an offset found in the copy drifts,
+and a `str` sliced off a char boundary does not return an error, it PANICS. The copy is therefore
+built one char at a time alongside the original byte each of its chars came from. The prove-it, with
+that mapping replaced by the naive offset:
+
+```text
+left:  "tanbul."
+right: "stanbul"
+```
+
+One byte late, on a name that is merely Turkish. The same input two characters wider would have been
+a crash in the file pane rather than a wrong highlight.
+
+### Where the mask went: `Files::rows`, and only there
+
+`rows` is the one funnel every consumer of the pane's contents already goes through — the arrow keys,
+Home/End, PageUp/PageDown, Ctrl+A, the rubber band, `selected_rows`, the details popup's totals. It
+is where the `.*` toggle has always been applied (§19), for the same reason.
+
+So the filter is one `.filter()` beside that one, and every one of those consumers narrows at once.
+That is not a saving, it is the correctness property: **Select All under a filter takes what is on
+screen.** Had the mask been applied in the view instead — which is where a filter naturally wants to
+go, since a filter is a thing you can see — the grid would draw four names while Ctrl+A selected
+thirty, and the batch download that followed would carry twenty-six files the user never saw. The
+test that pins this is not the one that checks the rows; it is
+`selecting_everything_under_a_filter_takes_only_what_is_on_screen`.
+
+### Two states, because a filter is a means and not an end
+
+The reason to narrow a folder to four names is to then ACT on one of them. So the bar has two states
+rather than one:
+
+  * **typing** — the field holds the keyboard, which it must, or `is_typing` (§50) reads the next
+    letter as someone starting a command at the prompt, hands the focus to the shell, and the rest of
+    the pattern is typed into the remote. That is what `KeyboardClaim::PaneFilter` is for, and it is
+    held only while `filter_typing`.
+  * **in force** — Enter hands the keyboard back to the grid with the pattern still applied, so the
+    arrows walk the four rows that survived and Ctrl+A takes them.
+
+Esc clears and shuts together. A bar left open but empty is a second state that looks like a third
+(is it filtering? by what?), and one keystroke brings it back.
+
+**Ctrl+F, not Ctrl+Shift+F.** The scrollback find bar had to take the Shift form (§35) because plain
+Ctrl+F is readline's forward-char and belongs to the shell. Here the shell does not have the keyboard
+— the pane does — so the bare key is free, and it is the one every file manager and every browser has
+trained people to press. The home screen's filter box made the same argument for the same key (§49).
+
+### The pattern does not survive a `cd`
+
+`Files::show` drops it; `Files::refresh` keeps it. That asymmetry is deliberate and it is the one
+place this differs from the sort beside it, which outlives a change of directory on purpose (§19).
+
+A sort means the same thing in every folder. A pattern is about the names in ONE of them. A pane that
+opened already hiding most of a folder, because of something typed two folders ago, is a folder the
+user will read as smaller than it is — and the only clue would be a bar they have stopped looking at.
+So the clear lives in `show` (arriving somewhere new) and not in the `begin` the two share, because
+F5 and a rename landing both go through `begin` and must NOT undo a filter the user is looking through
+right now.
+
+### Why the bar is in the header row and not a row of its own
+
+Geometry, not taste, and it is worth writing down because the obvious layout is the expensive one.
+
+`HEADER_HEIGHT` is not the header's height. It is **where the grid starts**, and it is read by the
+rubber band's hit test (`band_hits`), the band's clip (`band_layer`), the details popup's placement,
+the page-key row count (`grid_height` → `page_rows`) and `app`'s "did this press land on the grid".
+A bar of its own would move the grid's top edge *only while it happened to be open* — turning every
+one of those from a constant into a function of pane state, and making a rubber band dragged with the
+filter up select the wrong cells.
+
+The header already has two flexible items in it, the path and the item count. The field takes its
+room out of the path's ellipsis budget, so the folder never stops being named — the pane is showing a
+third of a folder and which folder is exactly what still has to be readable.
+
+The count earns its place here too: while a filter is in force it reads `4 of 30` rather than
+`30 items`. A pane that hides twenty-six entries and still claims thirty is worse than one that hides
+them silently, because it invites the arithmetic and then fails it.
+
+### What the highlight is allowed not to know
+
+The match is looked for in the ELIDED name — what is actually drawn — rather than in the real one.
+`elide_middle` (§22) cuts a long name's middle out, so a range found in the original points somewhere
+else entirely in what is on screen, and a range that misses a char boundary panics.
+
+The cost is stated in a `ponytail:` comment: a match living in the cut-out middle is not painted,
+though the row still shows. That is the right way round. The row showing is the load-bearing claim —
+the filter matched the real name — and the highlight is the aid. Eliding AROUND the match is the
+upgrade path if long names ever make it felt.
+
+### What to keep
+
+**A second rule for the same question is a lie waiting to be written.** The mask and the highlight
+are one rule asked twice, and `match_range` delegates its glob half to `matches` rather than
+re-deriving it. Two implementations of "did this match" cannot be kept in step by anything a compiler
+or a test can see.
+
+**A filter belongs where the rows are decided, not where they are drawn.** The view is where a filter
+LOOKS like it belongs, and putting it there would have made Select All act on rows nobody could see.
+Every consumer going through one funnel is what made this a one-line change with no way to get it
+half-right.
+
+**A range into a string is a crash surface, not a number.** `text[a..b]` panics off a char boundary.
+Anything that computes one from a transformed copy of the text has to carry the mapping back, and the
+test that proves it needs a character whose lowercase is not the same length — not merely a non-ASCII
+one.
+
+**`HEADER_HEIGHT` was never the header's height.** A constant whose name describes one thing and
+whose readers depend on another is a trap for exactly the change that wants to put a row there. The
+layout that kept it constant was the cheap one and the correct one at once.
