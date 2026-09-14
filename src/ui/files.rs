@@ -457,13 +457,15 @@ fn header(files: &Files, show_hidden: bool, width: f32, shown: usize) -> Element
 					.width(Length::Fill)
 					.align_x(Horizontal::Right),
 			)
-			// Open or shut the name filter; lit while a pattern is in force (§174). Always here,
-			// so the mouse has the way in that Ctrl+F is for the keyboard.
-			.push(filter_button(files.filter().is_some()))
 			// Re-list the directory on show; the twin of the tree's header ↻ (§18, §19).
 			.push(refresh_button(Message::Files(FilesMessage::Refresh)))
 			// Drop the sort menu; lit when a non-default order is in effect (§19).
 			.push(sort_button(files.sort_key().is_some()))
+			// Open or shut the name filter; lit while a pattern is in force (§174). Always here,
+			// so the mouse has the way in that Ctrl+F is for the keyboard. Next to the `.*` toggle
+			// because the two are the pane's two filters — one by name and one by dot-prefix — and
+			// they belong together rather than either of them beside the re-list and the sort.
+			.push(filter_button(files.filter().is_some()))
 			.push(hidden_toggle(show_hidden)),
 	)
 	.width(Length::Fill)
