@@ -242,6 +242,14 @@ pub enum FilesMessage {
 	/// A direction was picked in the sort menu (§19). Remembered even with no key set, so it is
 	/// ready the moment one is.
 	SortDirPicked(SortDir),
+	/// A keystroke in the name filter field (§174): the pattern as it now reads.
+	FilterEdited(String),
+	/// Enter in the filter field (§174): keep the pattern, hand the keyboard to the grid, so the
+	/// arrows and Ctrl+A act on what survived.
+	FilterSubmitted,
+	/// The filter bar's ✕, and what Esc arrives as (§174): drop the pattern and put the whole
+	/// listing back.
+	FilterClosed,
 	/// Re-list the directory on show — the refresh for a folder changed from the shell.
 	Refresh,
 	/// Menu "Copy name" / "Copy relative path" / "Copy full path".
@@ -404,6 +412,20 @@ pub struct Files {
 	sort: Option<SortKey>,
 	sort_dir: Option<SortDir>,
 	sort_menu_open: bool,
+	/// The name filter (§174): `None` when the bar is shut, `Some` with what has been typed into
+	/// it — which starts empty, because opening the bar is not yet a filter.
+	///
+	/// Unlike the sort beside it, this does NOT outlive a change of directory: a sort is a view
+	/// preference that means the same thing in every folder, while a pattern is about the names in
+	/// one of them. A pane that opened already hiding most of a folder, for something typed two
+	/// folders ago, is the bug that follows from treating them alike — so [`Self::show`] drops it
+	/// and [`Self::refresh`] (F5, a rename) keeps it.
+	filter: Option<String>,
+	/// Whether the filter field has the keyboard right now (§174). Two states, not one, because
+	/// the point of the filter is to then ACT on what survived: Enter hands the keyboard back to
+	/// the grid with the pattern still in force, so the arrows and Ctrl+A walk the narrowed
+	/// listing. Without this the only way out of the field would be Esc, which clears.
+	filter_typing: bool,
 }
 
 impl Default for Files {
@@ -436,6 +458,8 @@ impl Default for Files {
 			sort: None,
 			sort_dir: None,
 			sort_menu_open: false,
+			filter: None,
+			filter_typing: false,
 		}
 	}
 }
@@ -813,6 +837,58 @@ impl Files {
 		self.sort_menu_open = false;
 	}
 
+	/// What is typed in the name filter, or `None` when the bar is shut (§174). The view draws the
+	/// bar on `Some` and asks `crate::glob::match_range` with this to paint each surviving name.
+	pub fn filter(&self) -> Option<&str> {
+		self.filter.as_deref()
+	}
+
+	/// Whether the filter field holds the keyboard (§174) — what `app` turns into a
+	/// `KeyboardClaim`, so a letter typed into the box does not also reach the remote shell.
+	pub fn filter_typing(&self) -> bool {
+		self.filter_typing
+	}
+
+	/// Ctrl+F: open the filter bar and put the cursor in it (§174). Pressed again while the bar
+	/// is already up it only takes the keyboard back, KEEPING what was typed — the same second-press
+	/// behaviour the scrollback find bar has (§35), and the way back into the field after Enter
+	/// handed the keyboard to the grid.
+	pub fn open_filter(&mut self) {
+		self.filter.get_or_insert_with(String::new);
+		self.filter_typing = true;
+		// Only one surface may be up: a menu left open over a pane that is about to re-flow to a
+		// third of its rows is pointing at a cell that has moved.
+		self.menu = None;
+		self.pane_menu = None;
+		self.sort_menu_open = false;
+	}
+
+	/// A keystroke in the filter field (§174).
+	pub fn set_filter(&mut self, pattern: String) {
+		self.filter = Some(pattern);
+	}
+
+	/// Enter in the filter field: hand the keyboard back to the grid, leaving the pattern in force
+	/// and the bar on screen (§174). This is what makes the filter useful rather than merely
+	/// pretty — the whole point of narrowing a folder to four names is to then arrow onto one of
+	/// them, or Ctrl+A the lot and download it.
+	///
+	/// The bar STAYS visible, which is not decoration: a pane hiding most of a folder must say why,
+	/// and the pattern on screen is the only thing that does.
+	pub fn stop_filter_typing(&mut self) {
+		self.filter_typing = false;
+	}
+
+	/// Esc, or the bar's ✕: drop the filter and put the whole listing back (§174).
+	///
+	/// Clearing and closing are ONE action on purpose. A bar left open but empty is a second
+	/// state that looks like a third (is it filtering? by what?), and the way back to it is one
+	/// keystroke.
+	pub fn close_filter(&mut self) {
+		self.filter = None;
+		self.filter_typing = false;
+	}
+
 	/// Pick a sort key from the menu (§19). Picking the one already lit clears the sort: the menu
 	/// carries no "None" row, so the active key doubles as the way back to the default order.
 	pub fn pick_sort_key(&mut self, key: SortKey) {
@@ -1016,6 +1092,11 @@ impl Files {
 			return None;
 		}
 		self.path = Some(path.to_owned());
+		// The name filter belongs to the folder that was on show, not to the pane (§174). Dropped
+		// HERE rather than in `begin`, which is the difference between arriving somewhere new and
+		// re-reading where you are: F5 and a rename both go through `begin` and must keep the
+		// pattern, or refreshing a filtered folder would silently undo the filter.
+		self.close_filter();
 		Some(self.begin())
 	}
 
@@ -1191,11 +1272,22 @@ impl Files {
 	/// The entries to draw, in order (§19). Dot-prefixed names are filtered here rather
 	/// than at fetch time, so flipping the shared `.*` toggle (the tree's, §18) costs
 	/// nothing — and the filter is the only thing that toggle does.
+	///
+	/// The name filter (§174) is applied here too, and *here* is the point: this is the one place
+	/// every consumer of the pane's contents goes through — the arrow keys, Home/End, Ctrl+A, the
+	/// rubber band, `selected_rows`, the details popup's totals. Masking a row here masks it for
+	/// all of them at once, so a Select All under a filter takes what is on screen and a batch
+	/// download can never carry an entry the user cannot see. The alternative — filtering in the
+	/// view — would draw one listing and act on another.
 	pub fn rows(&self, show_hidden: bool) -> Vec<&Entry> {
+		// Borrowed rather than cloned: the closure below runs once per entry, and a folder of
+		// 237,173 (§166) is the size this pane is expected to survive.
+		let pattern = self.filter.as_deref().unwrap_or_default();
 		let mut rows: Vec<&Entry> = self
 			.entries
 			.iter()
 			.filter(|entry| show_hidden || !entry.name.starts_with('.'))
+			.filter(|entry| crate::glob::matches(pattern, &entry.name))
 			.collect();
 		// Only a user-chosen sort re-orders here. With none, the entries are already in the default
 		// dirs-first-by-name order — `sort` below, run once by `chunk` or `failed` when the listing
@@ -1719,6 +1811,128 @@ mod tests {
 		let request = files.show("/home").expect("a new directory needs listing");
 		files.chunk(request, entries.to_vec(), true);
 		(files, request)
+	}
+
+	/// The filter masks rows, and it masks them at `rows` — which is what makes every consumer
+	/// agree (§174). Nothing is dropped from the listing itself, so clearing puts it all back.
+	#[test]
+	fn the_name_filter_masks_the_rows_that_do_not_match() {
+		let (mut files, _) = pane(&[
+			entry("zip-a.zip", FilesKind::File),
+			entry("zip-b.zip", FilesKind::File),
+			entry("notes.txt", FilesKind::File),
+			entry("README", FilesKind::File),
+		]);
+		assert_eq!(names(&files).len(), 4, "the whole folder, unfiltered");
+
+		files.open_filter();
+		assert_eq!(
+			names(&files).len(),
+			4,
+			"opening the bar is not yet a filter"
+		);
+
+		files.set_filter("zip".to_owned());
+		assert_eq!(names(&files), vec!["zip-a.zip", "zip-b.zip"]);
+		assert_eq!(
+			files.count(),
+			4,
+			"the listing is untouched — only the view narrows"
+		);
+
+		// The glob rule reaches the pane too, whole-name anchored (§49).
+		files.set_filter("*.txt".to_owned());
+		assert_eq!(names(&files), vec!["notes.txt"]);
+
+		// Case is not a distinction anyone filenaming makes deliberately.
+		files.set_filter("readme".to_owned());
+		assert_eq!(names(&files), vec!["README"]);
+
+		files.close_filter();
+		assert_eq!(
+			names(&files).len(),
+			4,
+			"clearing puts the whole folder back"
+		);
+	}
+
+	/// The reason the filter lives in `rows` rather than in the view: everything that ACTS on the
+	/// pane reads the same narrowed listing (§174). A Select All under a filter takes what is on
+	/// screen, so a batch download can never carry an entry the user cannot see.
+	#[test]
+	fn selecting_everything_under_a_filter_takes_only_what_is_on_screen() {
+		let (mut files, _) = pane(&[
+			entry("zip-a.zip", FilesKind::File),
+			entry("zip-b.zip", FilesKind::File),
+			entry("secret.key", FilesKind::File),
+		]);
+		files.open_filter();
+		files.set_filter("zip".to_owned());
+
+		files.select_all(false);
+		let selected: Vec<String> = files
+			.selected_rows(false)
+			.into_iter()
+			.map(|(_, entry)| entry.name.clone())
+			.collect();
+		assert_eq!(selected, vec!["zip-a.zip", "zip-b.zip"]);
+		assert_eq!(
+			files.selection_totals(&files.rows(false)).items,
+			2,
+			"and the details card counts the same two"
+		);
+	}
+
+	/// A pattern is about the names in ONE folder, so arriving somewhere new drops it — while
+	/// re-reading where you are keeps it (§174). The two go through `show` and `refresh`
+	/// respectively, which is why the clear is in `show` and not in the `begin` they share.
+	#[test]
+	fn the_filter_is_dropped_on_arrival_and_kept_on_a_refresh() {
+		let mut files = Files::default();
+		let request = files.show("/home").expect("a new directory needs listing");
+		files.chunk(request, vec![entry("zip-a.zip", FilesKind::File)], true);
+		files.open_filter();
+		files.set_filter("zip".to_owned());
+
+		// F5, a rename landing — the folder is re-read, and the user is still looking at it.
+		files.refresh();
+		assert_eq!(files.filter(), Some("zip"), "a refresh is not a move");
+
+		// Browsing into another folder is. A pane that opened already hiding most of a folder,
+		// for a pattern typed somewhere else, is the bug this prevents.
+		files.show("/etc");
+		assert_eq!(files.filter(), None);
+		assert!(!files.filter_typing());
+	}
+
+	/// Two states, not one: Enter keeps the pattern and hands the keyboard to the grid, which is
+	/// the whole point of narrowing a folder — you then act on what is left (§174). Esc is the
+	/// one that clears, and Ctrl+F pressed again takes the field back without losing what is in it.
+	#[test]
+	fn enter_keeps_the_filter_and_gives_the_keyboard_back() {
+		let mut files = Files::default();
+		assert_eq!(files.filter(), None);
+		assert!(!files.filter_typing(), "shut: the grid has the keys");
+
+		files.open_filter();
+		files.set_filter("zip".to_owned());
+		assert!(files.filter_typing());
+
+		files.stop_filter_typing();
+		assert_eq!(files.filter(), Some("zip"), "still filtering");
+		assert!(!files.filter_typing(), "but the arrows work again");
+
+		files.open_filter();
+		assert_eq!(
+			files.filter(),
+			Some("zip"),
+			"a second Ctrl+F does not erase it"
+		);
+		assert!(files.filter_typing());
+
+		files.close_filter();
+		assert_eq!(files.filter(), None);
+		assert!(!files.filter_typing());
 	}
 
 	#[test]

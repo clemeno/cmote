@@ -104,14 +104,33 @@ impl Tab {
 			Edge(bool),
 		}
 
-		// Ctrl+A takes the whole listing (§21). Checked before the named-key gate below,
-		// since it is the pane's only shortcut on a character key.
+		// Ctrl+A takes the whole listing (§21) — "the whole listing" being whatever `rows` says,
+		// so under a filter it takes what is on screen (§174). Checked before the named-key gate
+		// below, as are the pane's two shortcuts on character keys.
 		if modifiers.control()
 			&& matches!(key, iced::keyboard::Key::Character(character)
 				if character.as_str().eq_ignore_ascii_case("a"))
 		{
 			self.panes.pane.select_all(self.panes.show_hidden());
 			return iced::Task::none();
+		}
+
+		// Ctrl+F opens the name filter over this pane and puts the cursor in it (§174) — the
+		// browser's shortcut for the same thing, and the one the home screen's filter box already
+		// answers to (§49). Plain Ctrl+F belongs to the SHELL (readline's forward-char), which is
+		// why the scrollback find bar had to take Ctrl+Shift+F (§35); here the shell does not have
+		// the keyboard, the pane does, so the bare key is free and is the one people reach for.
+		//
+		// Pressing it again while the bar is up takes the field back without erasing the pattern —
+		// the way back in after Enter handed the keyboard to the grid.
+		if modifiers.control()
+			&& !modifiers.alt()
+			&& !modifiers.logo()
+			&& matches!(key, iced::keyboard::Key::Character(character)
+				if character.as_str().eq_ignore_ascii_case("f"))
+		{
+			self.panes.pane.open_filter();
+			return iced::widget::operation::focus(ui::files::FILTER_INPUT_ID);
 		}
 
 		let iced::keyboard::Key::Named(named) = key else {
@@ -748,6 +767,17 @@ impl Tab {
 				self.panes.pane.pick_sort_dir(dir);
 				self.persist_session();
 			}
+			// The name filter (§174). Deliberately NOT persisted, unlike the sort above it: a
+			// pattern is about the names in one folder, and the pane does not even carry it across
+			// a `cd` (`Files::show`), let alone across a session.
+			FilesMessage::FilterEdited(pattern) => {
+				self.panes.pane.set_filter(pattern);
+				// The rows just re-flowed under the cursor, which may now be on a masked entry —
+				// scroll so whatever is still selected is where the user left it.
+				return self.scroll_files_into_view();
+			}
+			FilesMessage::FilterSubmitted => self.panes.pane.stop_filter_typing(),
+			FilesMessage::FilterClosed => self.panes.pane.close_filter(),
 			FilesMessage::Refresh => {
 				self.panes.pane.close_menu();
 				if let Some(request) = self.panes.pane.refresh() {

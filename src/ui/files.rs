@@ -49,6 +49,10 @@ pub const RENAME_INPUT_ID: &str = "files-rename";
 /// selection back into view (§20).
 pub const GRID_ID: &str = "files-grid";
 
+/// The widget id of the name filter's field (§174), so Ctrl+F can put the cursor straight in it —
+/// the same arrangement the inline rename above has.
+pub const FILTER_INPUT_ID: &str = "files-filter";
+
 /// The bundled icon face (Material Icons, Apache-2.0 — see assets/). Named exactly as
 /// the font declares itself, the same discipline as the terminal's Fira Mono: iced
 /// resolves faces by family name, and a name that does not match falls back to a system
@@ -150,7 +154,25 @@ const COLLAPSE_GLYPH: char = '\u{e5d6}';
 /// Material Icons' `sort`: the header button that drops the sort menu (§19). Lit (foreground) when
 /// a sort is in effect, dimmed like a disabled control when the grid is in its default order.
 const SORT_GLYPH: char = '\u{e164}';
+/// Material Icons' `search` and `close`: the name filter's own two glyphs (§174) — the first a
+/// label in front of the field, the second the button that drops the pattern and shuts the bar.
+const SEARCH_GLYPH: char = '\u{e8b6}';
+const CLOSE_GLYPH: char = '\u{e5cd}';
 const HEADER_ICON_SIZE: f32 = 16.0;
+
+/// The name filter, drawn INSIDE the header row rather than as a bar of its own (§174).
+///
+/// That choice is geometry, not taste. `HEADER_HEIGHT` is where the grid starts, and it is read by
+/// the rubber band's hit test, the band's clip, the details popup's placement, the page-key row
+/// count and `app`'s "did this press land on the grid" — a bar of its own would move the grid's top
+/// edge only while it happened to be open, making every one of those a function of pane state. The
+/// header has room: the path and the item count are the two flexible items in it, and the field
+/// takes some of the path's.
+///
+/// `FILTER_WIDTH` is what the field occupies, subtracted from the path's ellipsis budget while the
+/// bar is up so the folder never stops being named — the pane is showing a third of a folder, and
+/// which folder is exactly what a user needs to still read.
+const FILTER_WIDTH: f32 = 180.0;
 
 /// Icon colours by category (§19). Muted enough to sit on the dark pane, distinct
 /// enough that a directory of mixed content is scannable.
@@ -163,6 +185,14 @@ const DOCUMENT_COLOR: Color = Color::from_rgb8(0xc8, 0xc8, 0xc8);
 const AUDIO_COLOR: Color = Color::from_rgb8(0xe0, 0x98, 0xb0);
 const VIDEO_COLOR: Color = Color::from_rgb8(0xd8, 0x98, 0x78);
 const PLAIN_COLOR: Color = Color::from_rgb8(0xa8, 0xa8, 0xa8);
+
+/// What the name filter paints over the part of a name it matched (§174). The amber wash the
+/// scrollback find bar already uses for a match (`ui::grid::MATCH_BG`, §39), not a new colour: the
+/// two are the same idea one screen apart, and a second "found it" hue would make the user learn
+/// twice. The text stays foreground — the fill is what changes, as it does in the grid, so a
+/// matched name reads exactly as well as an unmatched one.
+const MATCH_BG: Color = Color::from_rgb8(0x54, 0x46, 0x1c);
+const MATCH_FG: Color = FG;
 
 /// The ring drawn round the pane while a file from the OS is being dragged over the window (§29):
 /// a green that reads as "drop here", deliberately unlike the blue focus ring so the two states
@@ -196,7 +226,9 @@ pub fn pane(
 	let entries = files.rows(show_hidden);
 
 	let mut content = column![
-		header(files, show_hidden, width),
+		// `entries.len()` is the filtered count (§174) — the header prints it against the whole
+		// listing, so a pane showing four of thirty says so rather than claiming thirty.
+		header(files, show_hidden, width, entries.len()),
 		entry_grid(files, &entries, width)
 	]
 	.spacing(0);
@@ -368,39 +400,62 @@ pub fn page_rows(files: &Files) -> usize {
 /// The pane header: which directory is on show, how it is getting on, and the shared
 /// dot-entry toggle. The count is the pane's only progress indicator while a big listing
 /// streams in — it climbs a batch at a time (§19).
-fn header(files: &Files, show_hidden: bool, width: f32) -> Element<'_, Message> {
+fn header(files: &Files, show_hidden: bool, width: f32, shown: usize) -> Element<'_, Message> {
 	// Trimmed to one line's worth of glyphs so a deep path never overflows the toolbar (§22);
 	// the copy button beside it puts the whole path on the clipboard, and the tree header
-	// names the same location across two lines.
-	let per_line = super::cells(width - HEADER_CONTROLS_WIDTH, HEADER_CHAR).max(1);
+	// names the same location across two lines. The filter field, when it is up, takes its room
+	// out of the path's budget (§174) rather than out of the controls' — the buttons have fixed
+	// widths and nowhere to give.
+	let taken = HEADER_CONTROLS_WIDTH
+		+ if files.filter().is_some() {
+			FILTER_WIDTH
+		} else {
+			0.0
+		};
+	let per_line = super::cells(width - taken, HEADER_CHAR).max(1);
 	let path = crate::ui::elide_middle(files.path().unwrap_or("no directory yet"), per_line);
+
+	// While a filter is in force the count says BOTH numbers (§174): a pane showing four of
+	// thirty entries has to say which four it is showing and that there are thirty, or the
+	// missing twenty-six read as a folder that is smaller than it is.
+	let total = files.count();
 	let status = if files.loading() {
-		format!("{} so far…", files.count())
+		format!("{total} so far…")
+	} else if files.filter().is_some_and(|pattern| !pattern.is_empty()) {
+		format!("{shown} of {total}")
 	} else {
-		format!("{} items", files.count())
+		format!("{total} items")
 	};
 
+	let mut controls = row![
+		up_button(files.path().and_then(explorer::parent).is_some()),
+		text(path).size(TEXT_SIZE).color(FG),
+		copy_button(
+			files.path().is_some(),
+			Message::Files(FilesMessage::CopyCurrentPath),
+		),
+	]
+	.spacing(12)
+	.align_y(Vertical::Center);
+
+	if let Some(pattern) = files.filter() {
+		controls = controls.push(filter_field(pattern));
+	}
+
 	container(
-		row![
-			up_button(files.path().and_then(explorer::parent).is_some()),
-			text(path).size(TEXT_SIZE).color(FG),
-			copy_button(
-				files.path().is_some(),
-				Message::Files(FilesMessage::CopyCurrentPath),
-			),
-			text(status)
-				.size(TEXT_SIZE)
-				.color(MUTED_FG)
-				.width(Length::Fill)
-				.align_x(Horizontal::Right),
+		controls
+			.push(
+				text(status)
+					.size(TEXT_SIZE)
+					.color(MUTED_FG)
+					.width(Length::Fill)
+					.align_x(Horizontal::Right),
+			)
 			// Re-list the directory on show; the twin of the tree's header ↻ (§18, §19).
-			refresh_button(Message::Files(FilesMessage::Refresh)),
+			.push(refresh_button(Message::Files(FilesMessage::Refresh)))
 			// Drop the sort menu; lit when a non-default order is in effect (§19).
-			sort_button(files.sort_key().is_some()),
-			hidden_toggle(show_hidden),
-		]
-		.spacing(12)
-		.align_y(Vertical::Center),
+			.push(sort_button(files.sort_key().is_some()))
+			.push(hidden_toggle(show_hidden)),
 	)
 	.width(Length::Fill)
 	.height(Length::Fixed(HEADER_HEIGHT))
@@ -410,6 +465,33 @@ fn header(files: &Files, show_hidden: bool, width: f32) -> Element<'_, Message> 
 		background: Some(HEADER_BG.into()),
 		..container::Style::default()
 	})
+	.into()
+}
+
+/// The name filter's field, in the header while the bar is up (§174): a search glyph, what has
+/// been typed, and a ✕ that drops the pattern and shuts the bar.
+///
+/// `on_submit` is Enter, and it does NOT close anything — it hands the keyboard back to the grid
+/// with the pattern still in force, which is the whole point of narrowing a folder: you then arrow
+/// onto one of the four names left, or Ctrl+A the lot. Esc is the one that clears, and it arrives
+/// through `KeyboardClaim::PaneFilter` rather than from here.
+fn filter_field(pattern: &str) -> Element<'_, Message> {
+	row![
+		text(SEARCH_GLYPH.to_string())
+			.font(ICON_FONT)
+			.size(HEADER_ICON_SIZE)
+			.color(MUTED_FG),
+		text_input("Filter names", pattern)
+			.id(FILTER_INPUT_ID)
+			.size(TEXT_SIZE)
+			.padding(Padding::from([0.0, 4.0]))
+			.width(Length::Fixed(FILTER_WIDTH))
+			.on_input(|value| Message::Files(FilesMessage::FilterEdited(value)))
+			.on_submit(Message::Files(FilesMessage::FilterSubmitted)),
+		header_icon_button(CLOSE_GLYPH, Message::Files(FilesMessage::FilterClosed)),
+	]
+	.spacing(4)
+	.align_y(Vertical::Center)
 	.into()
 }
 
@@ -853,13 +935,7 @@ fn cell<'a>(
 			.on_input(|value| Message::Files(FilesMessage::RenameEdited(value)))
 			.on_submit(Message::Files(FilesMessage::RenameCommitted))
 			.into(),
-		None => text(crate::ui::elide_middle(&entry.name, label_budget()))
-			.size(LABEL_SIZE)
-			.color(FG)
-			.wrapping(Wrapping::Glyph)
-			.align_x(Horizontal::Left)
-			.width(Length::Fill)
-			.into(),
+		None => name_label(&entry.name, files.filter()),
 	};
 
 	let is_selected = files.is_selected(&path);
@@ -898,6 +974,57 @@ fn cell<'a>(
 		.on_press(Message::Files(FilesMessage::EntryClicked(path.clone())))
 		.on_double_click(Message::Files(FilesMessage::EntryOpened(path.clone())))
 		.on_right_press(Message::Files(FilesMessage::EntryRightClicked(path)))
+		.into()
+}
+
+/// A cell's name, with the filter's match painted into it (§174).
+///
+/// With no filter this is one plain `text`, exactly what the cell drew before — the common case
+/// pays nothing for a feature that is not on. With one, the name becomes three spans and the
+/// middle one is lit, which is what says *why* this row survived and the twenty-six beside it did
+/// not. A glob match lights the whole name, because a glob is anchored to the whole name
+/// (`glob::match_range`); only a typed fragment has a part.
+///
+/// The match is looked for in the ELIDED name, not the real one. `elide_middle` (§22) cuts a long
+/// name's middle out, so a range found in the original would point somewhere else entirely in what
+/// is drawn — and a range that misses a char boundary panics when the span is sliced. Looking in
+/// what is actually on screen cannot be wrong about what is on screen.
+///
+/// `ponytail:` a match that lives in the cut-out middle is therefore not painted, though the row
+/// still shows — the filter matched the real name, which is the part that must be right. Paint it
+/// properly by eliding AROUND the match if long names ever make this felt.
+fn name_label<'a>(name: &str, pattern: Option<&str>) -> Element<'a, Message> {
+	let shown = crate::ui::elide_middle(name, label_budget());
+	let Some(span) = pattern.and_then(|pattern| crate::glob::match_range(pattern, &shown)) else {
+		return text(shown)
+			.size(LABEL_SIZE)
+			.color(FG)
+			.wrapping(Wrapping::Glyph)
+			.align_x(Horizontal::Left)
+			.width(Length::Fill)
+			.into();
+	};
+
+	// Owned, because the spans outlive `shown`. Three of them, and the empty ones are kept rather
+	// than filtered: a match at the very start or the very end is the common case, and an empty
+	// span draws nothing.
+	let before = shown[..span.start].to_owned();
+	let hit = shown[span.clone()].to_owned();
+	let after = shown[span.end..].to_owned();
+
+	// Annotated because `rich_text` is generic over a LINK payload and nothing here carries one:
+	// these spans are never clicked, so `()` is the type there is no other evidence for.
+	let spans: [iced::widget::text::Span<'a, ()>; 3] = [
+		iced::widget::span(before).color(FG),
+		iced::widget::span(hit).color(MATCH_FG).background(MATCH_BG),
+		iced::widget::span(after).color(FG),
+	];
+
+	iced::widget::rich_text(spans)
+		.size(LABEL_SIZE)
+		.wrapping(Wrapping::Glyph)
+		.align_x(Horizontal::Left)
+		.width(Length::Fill)
 		.into()
 }
 

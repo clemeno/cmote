@@ -1,9 +1,14 @@
-// glob.rs — the one text rule behind the home screen's filter box (PLAN §49).
+// glob.rs — the one text rule behind both filter boxes: the home screen's (PLAN §49) and the
+// files pane's (§174).
 //
-// The filter box is not a search engine: it takes what the user has typed so far and answers,
-// per saved target, "does this row stay on screen?". That answer lives here and nowhere else,
+// A filter box is not a search engine: it takes what the user has typed so far and answers,
+// per row, "does this row stay on screen?". That answer lives here and nowhere else,
 // so the view (which rows to draw) and `app` (whether the selected row is still one of them)
 // can never disagree about what the box means.
+//
+// The pane asks a second question the home screen never did — WHERE in the name it matched, so
+// the cell can paint that part ([`match_range`]). It is the same two rules; splitting them would
+// let the mask keep a row for one reason and the highlight point at another.
 //
 // TWO rules in one function, because typing is the common case and globbing is the precise one:
 //
@@ -51,6 +56,57 @@ pub fn matches(pattern: &str, text: &str) -> bool {
 	let pattern: Vec<char> = pattern.chars().collect();
 	let text: Vec<char> = text.chars().collect();
 	glob(&pattern, &text)
+}
+
+/// WHERE `pattern` matched `text` — the byte range to paint, or `None` when it did not match
+/// at all (PLAN §174). The same two rules as [`matches()`], reporting a span instead of a yes.
+///
+/// The files pane masks the names that do not match and highlights the part that did, so it
+/// needs the narrower answer; the home screen only ever asked the yes/no. Both rules are stated
+/// once, here, because a highlight that could disagree with the mask would paint a name the
+/// filter kept for a different reason than the one shown.
+///
+/// A GLOB is anchored to the whole text by construction, so the match *is* the whole name and
+/// the range says so. Only a FRAGMENT has a span narrower than what it matched.
+///
+/// The range indexes `text` itself, not a lowercased copy of it. That distinction is the reason
+/// this is not three lines: lowercasing is not length-preserving — `İ` (U+0130) lowercases to
+/// TWO chars — so an offset found in the copy can land mid-character in the original, and
+/// slicing a `str` off a char boundary panics. The copy is therefore built alongside the
+/// original byte each of its chars came from.
+pub fn match_range(pattern: &str, text: &str) -> Option<std::ops::Range<usize>> {
+	// An empty box is not a filter, so there is nothing matched and nothing to paint. `matches`
+	// answers `true` here for the opposite reason — it is asked "does this row stay".
+	if pattern.is_empty() {
+		return None;
+	}
+	if pattern.contains(['*', '?']) {
+		return matches(pattern, text).then_some(0..text.len());
+	}
+
+	let pattern = pattern.to_lowercase();
+	let mut lower = String::new();
+	// `origin[i]` is the byte in `text` that produced `lower`'s i-th CHAR, plus a final sentinel
+	// so a match running to the very end has an end to map back to.
+	let mut origin: Vec<usize> = Vec::new();
+	for (at, character) in text.char_indices() {
+		for lowered in character.to_lowercase() {
+			origin.push(at);
+			lower.push(lowered);
+		}
+	}
+	origin.push(text.len());
+
+	// `find` gives a byte offset into `lower`, and `origin` is indexed by char — so both ends are
+	// counted in chars before they are mapped back.
+	let start = lower.find(&pattern)?;
+	let before = lower[..start].chars().count();
+	let within = pattern.chars().count();
+	// `ponytail:` a match ENDING inside a char's multi-char lowercase expansion maps back to that
+	// char's first byte, so the highlight stops just short of it. Both ends stay on a char
+	// boundary, which is the property that matters; widen to the whole char if a name ever shows
+	// it.
+	Some(origin[before]..origin[before + within])
 }
 
 /// Match `text` against `pattern` in full, where `*` stands for any run of characters
@@ -111,7 +167,7 @@ fn glob(pattern: &[char], text: &[char]) -> bool {
 
 #[cfg(test)]
 mod tests {
-	use super::matches;
+	use super::{match_range, matches};
 
 	/// The empty box is not a filter: every row stays. This is the state the screen opens in and
 	/// the state clearing it returns to, so it has to keep the whole list rather than hide it.
@@ -188,5 +244,67 @@ mod tests {
 		assert!(matches("*@10.0.0.7:22", "root@10.0.0.7:22"));
 		// A dot is a literal dot, not "any character" — this is a glob, not a regex.
 		assert!(!matches("root@1.", "root@10.0.0.7:22"));
+	}
+
+	/// A fragment points at the part it found, which is what the pane paints (§174). The range
+	/// indexes the ORIGINAL text, so slicing by it gives back exactly what was matched.
+	#[test]
+	fn a_fragment_reports_the_span_it_found() {
+		let name = "zip-bulk-1mib.zip";
+		let span = match_range("bulk", name).expect("the fragment is in there");
+		assert_eq!(&name[span.clone()], "bulk");
+		assert_eq!(span, 4..8);
+		// The FIRST occurrence, so the highlight is where the eye starts reading.
+		assert_eq!(match_range("zip", name), Some(0..3));
+	}
+
+	/// A glob is anchored to the whole text, so there is no narrower span to report — the match
+	/// is the name. Anything else would paint a part the rule never singled out.
+	#[test]
+	fn a_glob_reports_the_whole_text() {
+		assert_eq!(match_range("*.zip", "bulk.zip"), Some(0..8));
+		assert_eq!(
+			match_range("zip*", "bulk.zip"),
+			None,
+			"a glob is not a fragment"
+		);
+		assert_eq!(match_range("z?p*", "zip-a.zip"), Some(0..9));
+	}
+
+	/// No match and no pattern are both "paint nothing" — but they are different questions, and
+	/// only one of them also hides the row. `matches("")` is `true` (the row stays); there is
+	/// still nothing to highlight.
+	#[test]
+	fn nothing_to_paint_is_none_either_way() {
+		assert_eq!(match_range("db", "zip-a.zip"), None);
+		assert_eq!(match_range("", "zip-a.zip"), None);
+		assert!(matches("", "zip-a.zip"), "and yet the row stays");
+	}
+
+	/// Case is ignored here as it is everywhere else in this module, and the span still points
+	/// into the text AS TYPED — the highlight has to line up with the letters on screen, not
+	/// with a lowercased copy of them.
+	#[test]
+	fn a_span_survives_case_folding() {
+		let name = "README.TXT";
+		let span = match_range("readme", name).expect("case is not a distinction here");
+		assert_eq!(&name[span], "README");
+	}
+
+	/// The reason this returns a range rather than an index into a lowercased copy: lowercasing
+	/// is not length-preserving, and a range off a char boundary PANICS when the view slices by
+	/// it. `İ` (U+0130, two bytes) lowercases to two chars, so the copy is longer than the
+	/// original in chars and every offset after it is shifted.
+	#[test]
+	fn a_span_lands_on_char_boundaries_even_when_lowercasing_changes_the_length() {
+		let name = "İstanbul.txt";
+		let span = match_range("stanbul", name).expect("found after the trap character");
+		// The slice is the proof: this line panics if either end is off a boundary.
+		assert_eq!(&name[span], "stanbul");
+
+		// And a name whose characters are simply wider than one byte.
+		let name = "café-données.csv";
+		let span = match_range("données", name).expect("accented on both sides");
+		assert_eq!(&name[span], "données");
 	}
 }

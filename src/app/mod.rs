@@ -2922,6 +2922,14 @@ enum KeyboardClaim {
 	TreeRename,
 	/// Terminal: the files pane's inline rename (§19).
 	PaneRename,
+	/// Terminal: the files pane's name filter, while its field has the keyboard (§174). Below the
+	/// rename above it — a rename field and a filter field cannot both be up, but if they ever
+	/// were, the one being typed INTO a cell wins.
+	///
+	/// Held only while `filter_typing`, not for as long as the bar is on screen: Enter hands the
+	/// keyboard back to the grid with the pattern still in force, which is what lets the arrows and
+	/// Ctrl+A act on the rows that survived.
+	PaneFilter,
 	/// Terminal: the scrollback find bar (§35). Ranked LAST on purpose, and it is the only claimant
 	/// with an exception above it — see `on_key`, where Ctrl+Shift+F is allowed through so pressing
 	/// it again refocuses the field rather than being swallowed by the bar it opened.
@@ -6071,6 +6079,9 @@ impl Tab {
 				if self.panes.pane.editing().is_some() {
 					return Some(KeyboardClaim::PaneRename);
 				}
+				if self.panes.pane.filter_typing() {
+					return Some(KeyboardClaim::PaneFilter);
+				}
 				if self.search().is_some() {
 					return Some(KeyboardClaim::Find);
 				}
@@ -6103,6 +6114,9 @@ impl Tab {
 			KeyboardClaim::Transfers => self.transfers.escape(),
 			KeyboardClaim::TreeRename => self.panes.tree.cancel_rename(),
 			KeyboardClaim::PaneRename => self.panes.pane.cancel_rename(),
+			// Esc drops the pattern AND the bar together (§174) — an empty bar left open is a
+			// second state that looks like a third, and one keystroke brings it back.
+			KeyboardClaim::PaneFilter => self.panes.pane.close_filter(),
 			// The current match stays selected when the bar closes, so it can still be copied.
 			KeyboardClaim::Find => self.close_find(),
 		}
@@ -8107,6 +8121,82 @@ mod tests {
 
 		assert_eq!(app.focus, Focus::Files, "the pane keeps its own shortcut");
 		assert_eq!(next_input(&mut rx), None, "and nothing reached the shell");
+	}
+
+	/// Ctrl+F opens the pane's name filter and the field then HOLDS the keyboard (§174) — which is
+	/// the whole reason it needs a `KeyboardClaim`. Without one, `is_typing` reads the very next
+	/// letter as someone starting a command at the prompt, hands the focus to the shell, and the
+	/// pattern is typed into the remote instead of into the box.
+	#[test]
+	fn ctrl_f_opens_the_pane_filter_and_the_field_keeps_the_keyboard() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.focus = Focus::Files;
+
+		let _ = app.on_key(character_press(
+			"f",
+			iced::keyboard::key::Code::KeyF,
+			iced::keyboard::Modifiers::CTRL,
+		));
+
+		assert_eq!(app.panes.pane.filter(), Some(""), "the bar is up and empty");
+		assert_eq!(app.keyboard_claim(), Some(KeyboardClaim::PaneFilter));
+		assert_eq!(next_input(&mut rx), None, "nothing reached the shell");
+
+		// The letter that follows. It must NOT move the focus, or the rest of the pattern goes
+		// down the channel — the field itself receives it through the widget tree.
+		let _ = app.on_key(character_press(
+			"z",
+			iced::keyboard::key::Code::KeyZ,
+			iced::keyboard::Modifiers::empty(),
+		));
+		assert_eq!(app.focus, Focus::Files, "the focus stayed with the pane");
+		assert_eq!(
+			next_input(&mut rx),
+			None,
+			"and the letter did not reach the shell"
+		);
+	}
+
+	/// Esc drops the pattern and the bar together (§174), and Enter does neither — it hands the
+	/// keyboard back to the grid with the filter still in force, which is what lets the arrows and
+	/// Ctrl+A act on the rows that survived.
+	#[test]
+	fn enter_leaves_the_pane_filter_in_force_and_escape_clears_it() {
+		let (mut app, _rx) = app_with_terminal(16);
+		app.focus = Focus::Files;
+		app.panes.pane.open_filter();
+		app.panes.pane.set_filter("zip".to_owned());
+
+		let _ = app.on_files(FilesMessage::FilterSubmitted);
+		assert_eq!(app.panes.pane.filter(), Some("zip"), "still filtering");
+		assert_eq!(
+			app.keyboard_claim(),
+			None,
+			"but the grid has the keys back, so the arrows work"
+		);
+
+		// Ctrl+F again takes the field, keeping what is in it.
+		let _ = app.on_key(character_press(
+			"f",
+			iced::keyboard::key::Code::KeyF,
+			iced::keyboard::Modifiers::CTRL,
+		));
+		assert_eq!(app.panes.pane.filter(), Some("zip"));
+		assert_eq!(app.keyboard_claim(), Some(KeyboardClaim::PaneFilter));
+
+		// And Esc, which reaches the claimant rather than the pane's own Escape arm.
+		let _ = app.on_key(key_press(
+			iced::keyboard::key::Named::Escape,
+			iced::keyboard::key::Code::Escape,
+			iced::keyboard::Modifiers::empty(),
+		));
+		assert_eq!(app.panes.pane.filter(), None, "cleared and shut");
+		assert_eq!(app.keyboard_claim(), None);
+		assert_eq!(
+			app.focus,
+			Focus::Files,
+			"and Esc went to the bar, not to the pane's own hand-back to the shell"
+		);
 	}
 
 	/// Ctrl+V is the menu's Paste off the keyboard, so it is answered from wherever the ring is
