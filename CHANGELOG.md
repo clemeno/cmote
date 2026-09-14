@@ -11,6 +11,33 @@ itself — the one the tag will point at — rather than added afterwards. 4.0.0
 "unreleased" in the tree its own tag names, because filling the date in later is a step that
 happens after the only moment anyone is looking.
 
+## 4.1.0 — 2026-09-14
+
+One feature, and the first minor since 4.0.0: the files pane can be filtered by name.
+
+### Added
+
+- **Find a file in a crowded folder (§174).** Press **Ctrl+F** with the files pane focused, or the
+  new magnify button in its header, and type. Names that do not match are hidden, and the part that
+  *did* match is highlighted in each name still showing — so a folder narrows as you type and tells
+  you why each survivor survived. The header count changes with it, reading `4 of 30` rather than
+  `30 items`.
+
+  The pattern rule is the one the home screen's filter box already uses (§49): what you type matches
+  **anywhere** in a name, until you type a `*` or a `?` — then it is a shell-style glob against the
+  **whole** name. So `zip` finds `bulk-1mib.zip`, and `*.zip` finds only the files that end in it.
+  Case is ignored either way.
+
+  **Everything you can do to the pane then acts on what is left.** The arrow keys walk only the
+  names still showing, and Ctrl+A selects only those — so a Select All under a filter, followed by
+  a download or a delete, can never carry an entry you could not see.
+
+  **Enter** puts the keyboard back on the grid with the filter still applied, which is the point:
+  narrow to four names, press Enter, then arrow onto one or take the lot. **Esc**, or the magnify
+  button again, clears the filter and puts the whole folder back. Browsing into another folder also
+  clears it — a pattern is about the names in one folder — while **F5** keeps it, so refreshing what
+  you are looking at does not undo it.
+
 ## 4.0.2 — 2026-09-11
 
 ### Fixed
