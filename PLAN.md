@@ -20703,3 +20703,461 @@ one.
 **`HEADER_HEIGHT` was never the header's height.** A constant whose name describes one thing and
 whose readers depend on another is a trap for exactly the change that wants to put a row there. The
 layout that kept it constant was the cheap one and the correct one at once.
+
+## §175 — A Remote Monitor: the headless server gets a screen, and it is not a video stream
+
+Every section before this one records a decision after the code that proved it. This one is written
+the other way round: **nothing here is built.** It is the design for 5.0.0, settled by argument and
+by fact-finding, and it ends with the measurement that is allowed to kill it.
+
+The ask: open a window on this machine showing a graphical desktop from the remote, so that
+applications can be started there and used here — on servers that may have no desktop environment, no
+graphics card, and very little CPU, RAM or disk.
+
+### What was asked for, and the things in it that could not all be true
+
+Four contradictions had to be resolved before anything could be designed, and naming them is most of
+the design.
+
+**"May not have a graphical interface installed" versus "start applications".** If nothing graphical
+is installed there are no applications to start. A display server can be brought in; the X client
+libraries and the applications themselves cannot, and on a short disk that is not a detail. So the
+phrase had to mean one of three worlds, and cmote targets the middle one: **no display server
+running or installed, but X libraries present.** The third world — nothing graphical at all — is
+detected and refused with a plain statement of what is missing. cmote never runs `apt` or `dnf`.
+
+**"Initial resolution at half the physical screen it opens in on the remote PC."** A headless server
+has no physical screen and no monitor to read a resolution from. The half is of the **local** Monitor
+the window opens on. Same for "sync with the main physical monitor": a remote with no GPU has no
+refresh rate to sync to.
+
+**"Customisable refresh rate."** RFB has no frame rate. It is damage-driven: the client asks what
+changed, the server answers. The knob is real but it is the **cadence of asking**, and it is the dial
+that trades latency against the remote's CPU — the resource named as scarce. Calling it a refresh
+rate would have shipped a setting that lies about what it does.
+
+**"Very limited CPU" has no measurement behind it, in either direction.** No controlled benchmark of
+headless X plus VNC encoding has been published. What exists is anecdote, and it is bad: TigerVNC
+users reporting `Xvnc` over 50% CPU on a near-static screen under llvmpipe, an open upstream issue
+saying the same, a KasmVNC report of over 200% while connected. Idle RSS is unconfirmed everywhere.
+That is why this section ends where it does.
+
+### VNC and not RDP, and the decision is on the remote side
+
+Both protocols are cross-platform. Neither is tied to an OS. What is OS-bound is what ships
+preinstalled, which is a packaging fact rather than a technical one:
+
+| Remote OS | VNC server in the box? | RDP server in the box? |
+|---|---|---|
+| Windows 11 Pro / Server | no | **yes**, already running |
+| Windows 11 Home | no | no — client only |
+| macOS | **yes** — Screen Sharing *is* a VNC server | no |
+| Linux / BSD | no | no |
+
+So the rule is not "Linux uses VNC". It is: use what is already there; if nothing is, install the
+smallest thing that works. On Linux nothing is there, and `Xvnc` is the smallest thing — an X server
+and an RFB server **in one unprivileged binary**.
+
+```
+VNC path — Linux remote                 RDP path — Linux remote
+
+  apps                                    apps
+    │ X11                                   │ X11
+    ▼                                       ▼
+  ┌──────────────────────┐                Xorg + xorgxrdp (driver module)
+  │ Xvnc                 │                  │
+  │  X server + RFB      │                  ▼
+  │  ONE process         │                xrdp :3389
+  │  framebuffer in RAM  │                  │
+  └──────────┬───────────┘                  ▼
+             │                            sesman ── PAM ── SECOND LOGIN
+     unix socket, 0600                      (root to install and enable)
+             │
+   SSH ──────┘
+```
+
+Three processes against one, root against no root, and a **second authentication** after SSH has
+already authenticated. That last is not an inconvenience, it is a collision: §45–§47 govern which
+channel a secret may be handed to and when, and satisfying them for a second, different handshake is
+real design work with real risk. The VNC path has no second credential to place.
+
+RDP also carries a multiplexed virtual-channel bus — clipboard, audio, drive redirection, printers,
+smartcard. Most of it is redundant here: cmote has SFTP file panes, which beat `rdpdr`; clipboard is
+a decision already made the other way (OSC 52); audio was not asked for in that direction. The one
+genuine loss is client-initiated resize, and owning the client makes that ours to implement.
+
+**IronRDP is recorded as the answer to a different question.** It is the better-engineered client by
+a wide margin, and for a **Windows** remote the server side is free — already installed, already
+running, no root. That is the later section. Two things to check when it is written: IronRDP issue
+#1909 (garbled output and freeze against xrdp, open), and whether its native audio linkage reaches
+the core crates, because it pulls NASM on Windows and §11 forbids that.
+
+**waypipe is ruled out by fact, not preference.** No Rust client library exists, the Rust rewrite is
+GPL-3.0-or-later, and the local end needs a running Wayland compositor, which Windows does not have.
+
+One RFB client therefore reaches **Linux, BSD and macOS**, because macOS ships a VNC server.
+
+### The words, because every diagram depends on them
+
+Into CONTEXT.md with the first commit:
+
+**Framebuffer** — what `Xvnc` serves. RFB's own word: **R**emote **F**rame**B**uffer, RFC 6143. Zero
+prior occurrences in the tree, so the namespace is clean, and naming it after its specification is
+what the terminal programme already does.
+
+**Remote Monitor window** — the window on this machine showing a framebuffer. *Avoid* shortening it
+to "monitor" or "the remote monitor".
+
+**Monitor** — a physical panel on this machine. This documents existing practice rather than
+changing it: 29 occurrences already use it that way ("how big the monitor is", "clamped to the
+monitor", "per-monitor-DPI-aware"). Three uses mean *observer* — the Tunnels dialog is "a live
+monitor" — and are left alone as known exceptions.
+
+**remote** is the server; **this machine** is the Windows box. Both already fixed by CONTEXT.md.
+
+**"Remote desktop session" is refused.** **Session** is "one SSH connection and every shell running
+on it", and a Remote Monitor is not a new session — it rides the existing one over a channel. The
+persistent object is a **framebuffer**, and you **adopt** one.
+
+### The picture is a damage model, and that is why it survives the constraints
+
+```
+VIDEO MODEL  (AV1, H.264, RemoteFX)      DAMAGE MODEL  (RFB)
+
+every 1/60 s, unconditionally:           only when something changes:
+
+  ┌──────────────────────┐                 ┌──────────────────────┐
+  │   whole frame        │                 │                      │
+  │   motion-estimated   │ → encode → send │      ┌──────┐        │ → send
+  │   entropy-coded      │                 │      │██████│  only  │   just
+  └──────────────────────┘                 │      └──────┘  this  │   this
+                                           └──────────────────────┘
+  idle desktop = 60 encoded                  idle desktop =
+  frames per second of nothing               0 bytes, 0 CPU
+```
+
+There is no frame rate, no GOP, no temporal prediction. A still desktop costs nothing — not a small
+amount, nothing. **AV1 is the worst possible fit**: among the most expensive codecs to encode,
+needing hardware encode or many cores, on a host defined as having neither.
+
+What replaces motion compensation is **`CopyRect`** — "this rectangle is already on your screen, at
+these other coordinates". Scrolling or dragging a window becomes a few bytes and zero pixel data.
+Exact rather than predicted, and nearly free.
+
+The encodings shipped are **Raw, CopyRect, ZRLE and Tight**:
+
+| content | ZRLE | PNG | JPEG (inside Tight) |
+|---|---|---|---|
+| flat UI, text | excellent, lossless — per-tile palette + run-length | worse, generic deflate | bad, rings |
+| photo, video frame | poor | very poor | excellent |
+
+Tight was brought in for the second row, because occasional video and photographic content is in
+scope. **PNG was considered and rejected**: it would be a worse ZRLE rather than a safer JPEG —
+duplicating the lossless path badly while losing the only thing JPEG was added for. TightPNG exists
+as an encoding but is a browser story, and whether `Xvnc` emits it at all is unconfirmed.
+
+**Tight is not one encoding.** It is fill, JPEG, and basic-with-three-filters over **four independent
+zlib streams whose state persists across rectangles**. That is the sharp edge: desynchronise one
+stream and every rectangle after it is garbage with no error raised. `flate2` is already in the lock
+via russh, so it costs no dependency — but it is stateful decoding where ZRLE's tiles are
+self-contained.
+
+**The client is ours**, seeded by reading `vnc-rs` rather than depending on it. That crate is
+48 stars, one author, eighteen months between releases, and missing both things this needs:
+ExtendedDesktopSize (-308) for resize and ContinuousUpdates/Fence to avoid a round-trip per frame.
+Owning it means those are ours to implement. RFC 6143 is a small specification, and reading a
+specification line by line and writing down the refusals is what §56–§99 and §140–§165 already are.
+
+### §41 narrows a second time, and this is the guard it gets
+
+The standing rule, in Cargo.toml's own words: *a remote must not get a PNG/JPEG parser run on bytes
+it PUSHED into the terminal stream unasked* — which is why kitty graphics and OSC 1337 are still
+unimplemented. §53's preview tab **narrowed** that refusal rather than reversing it, because the user
+asked for that specific file.
+
+Tight's JPEG rectangles sit between the two. The remote chooses to send them, which resembles the
+refused case. But the client advertises which encodings it accepts, so JPEG arrives only because our
+own code opted in, per session — which resembles the allowed one. The difference from a preview is
+volume: thousands of automatic decodes per session instead of one file on a click.
+
+So the refusal narrows again, deliberately, with a guard the preview case does not get to have:
+
+  * **The RFB rectangle header states the exact width and height.** A JPEG whose dimensions disagree
+    is rejected before a scanline is decoded. A preview has no such second opinion.
+  * A byte-length cap per rectangle, and `image::Limits`, as §53 applies.
+
+The alternative was to refuse Tight entirely and keep Raw + CopyRect + ZRLE — lossless, no image
+parser anywhere near the wire, photographic regions simply expensive. That remains the honest lever
+if the exposure is ever judged too wide. Swapping JPEG for PNG is the one option that buys the cost
+without the benefit, since §41's wording names both parsers.
+
+### The socket is the authentication
+
+```
+Xvnc :N -rfbunixpath <0700-dir>/<unique>.sock -rfbunixmode 0600 \
+        -rfbport -1 -SecurityTypes None \
+        -MaxDisconnectionTime <N> -displayfd <fd>
+```
+
+Every flag is load-bearing, and the reasoning has to be read as a whole because any one of them
+missing restores the hole.
+
+**Loopback TCP is not a permission boundary.** A loopback socket carries no ownership and no
+permission bits; `connect()` to `127.0.0.1:5901` succeeds for **any UID on the machine**, with no
+kernel restriction by default. `-localhost` does not help — it filters the peer address, and every
+local account already has the right one. So "loopback plus no authentication" means every account on
+a shared server can watch and control the session.
+
+**`-rfbunixpath` does not disable TCP.** TigerVNC 1.12.0 deliberately made the Unix servers listen on
+both at once. Only `-rfbport -1` turns TCP off. Drop that single flag and `-SecurityTypes None`
+becomes the case above.
+
+**VncAuth is not the fallback it looks like.** RFC 6143 §7.2.2 is a DES challenge-response with the
+password **truncated to 8 bytes** — a 56-bit key, with offline crackers that recover it from a
+sniffed handshake. TigerVNC's own issue #601 and QEMU's security documentation both say such servers
+must be confined to loopback or Unix sockets. It would also put a second credential into the Target,
+whose definition says *never a secret*.
+
+**The socket path is unique per launch.** TigerVNC's Unix listener unconditionally `unlink`s the path
+before binding, so there is no stale protection at all and a second `Xvnc` silently steals it. A
+0700 parent directory closes this against other accounts; a random suffix closes it against a second
+window as the same user. And a socket file existing is never evidence that a server is alive — a
+SIGKILLed `Xvnc` leaves the socket, the X lock and the X socket behind.
+
+**The runnable check this path must leave behind:** after launch, verify that no TCP port is
+listening. TigerVNC issue #1374 reports 1.12.x regressing Unix-only listening, and whether 1.16.x
+still does is unconfirmed. A flag that is silently ignored is exactly the failure this check exists
+to catch.
+
+russh already has the client half: `channel_open_direct_streamlocal(path)` on `client::Handle`,
+channel type `direct-streamlocal@openssh.com`, needing OpenSSH 6.7 or newer on the far end.
+
+### Three layers stop an orphan living forever, and the obvious fourth is a trap
+
+`Xvnc` keeps running with no client attached. All four of its self-termination options default to 0,
+so an orphan is the out-of-the-box behaviour.
+
+  1. **cmote kills it on a clean close** — the per-target checkbox, checked by default. Covers every
+     deliberate exit.
+  2. **`-MaxDisconnectionTime`** — *"Terminate when no client has been connected for N seconds."*
+     This is the layer that covers what cmote cannot reach: a hard drop, a crashed `cmote.exe`, a
+     closed lid. It needs no connection, no watchdog and no second process, because the server
+     polices itself. The checkbox *is* this flag: checked sets it to 300 seconds, unchecked sets it
+     to 0, because persisting is the whole point of unchecking.
+  3. **The picker** garbage-collects whatever survived.
+
+Two near misses worth recording. `-IdleTimeout` **drops the connection, not the server**.
+`-MaxIdleTime` counts *input inactivity*, so it would kill a desktop running a long job unattended
+merely because nobody was typing. Only `-MaxDisconnectionTime` counts the orphan condition.
+
+**The trap is SIGHUP.** Running `Xvnc` in the foreground on an exec channel would have the SSH server
+kill it when the channel dies — free, automatic, covering even a crash. It is refused because **a
+two-second network blip would then destroy every running application**, and cmote already reconnects
+across drops (§16, §17). Trading the user's work for a leak that layer 2 catches anyway is the wrong
+trade.
+
+**The picker** lists framebuffers on the target before anything new is started, so one can be adopted
+or stopped. It shows **all** of them, ours marked as secured and foreign ones shown for what they
+are — an `Xvnc` started by hand is almost certainly on TCP with VncAuth, which is the exposure this
+design just closed, and hiding it would not make it safer. Connecting to one is therefore a
+deliberate, acknowledged act. Discovery is real work rather than a listing call: `vncserver -list`
+and the `~/.vnc/*.pid` files were **removed in TigerVNC 1.11.0**, and a directly-launched `Xvnc`
+writes no PID file at all. What is left is `/tmp/.X<N>-lock` (which holds the PID), `/tmp/.X11-unix/X<N>`
+and `ps`. The display number is not auto-chosen either; `-displayfd` makes the X server pick a free
+one and report it back, which beats reimplementing the probe.
+
+**Stopping one follows §18's shape** — a confirmation that names what goes. When `Xvnc` exits, every
+application inside it dies; the man page says so outright. There are no survivors and no detaching,
+so that confirmation is the only warning there will be.
+
+### The keyboard has to be taken, and given back
+
+A framebuffer needs **every** key — Tab, Alt+Tab, the lot — or the remote window manager is unusable.
+That collides head-on with §50, where the keyboard follows whatever was last acted on, and with every
+`KeyboardClaim` in the tree.
+
+Grab on a click into the Remote Monitor window; release on one reserved chord, defaulting to
+`Ctrl+Alt` pressed and released alone, which is what VirtualBox and virt-manager users already have
+in their fingers. **That chord is the one combination the remote can never receive**, and it is
+settable.
+
+This is a new and **strongest** `KeyboardClaim`, above `PaneFilter`, `PaneRename` and `Find`: while
+it is held, nothing in cmote may claim a key. A deliberate inversion of §50, recorded as one.
+
+**Clipboard goes this machine → remote only.** RFB carries a clipboard in both directions, but a
+remote writing the local clipboard is a decision already made the other way (OSC 52), and this
+refusal cites it so the two agree. The permitted direction carries no risk, because sending is a
+thing the user chooses to do — and without it, typing a URL into a remote browser by hand is what
+makes the window get closed.
+
+**Microphone forwarding is refused**, beside OSC 52 and the answerback refusal. A microphone is a
+live sensor in the room the user is sitting in, and forwarding it to a server on the strength of an
+SSH login is a category of access cmote has never taken. This is a decision, not a gap: it is not to
+be "completed" later without its own consent design.
+
+### Sound is a second channel, because RFB has none
+
+RFC 6143 has no audio and no extension for one. So sound is a separate SSH channel beside the RFB
+one — a genuine point in RDP's favour, given up deliberately.
+
+Direction is **remote → this machine only**: playback redirection, so a program on the server is
+heard on the local speakers.
+
+```
+PICTURE (RFB)                        SOUND (PCM / FLAC)
+
+nothing changed → nothing sent       nothing playing → samples of ZERO,
+                                     still arriving, at the sink's rate
+
+  ┌──────────────┐                     ├─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬─┤
+  │  (idle)      │  0 bytes            │0│0│0│0│0│0│0│0│0│0│0│0│0│0│0│
+  └──────────────┘  0 CPU              └─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┘
+                                       silence occupies TIME, so it
+                                       occupies the stream
+```
+
+**Audio has no damage model and cannot have one.** A sink is clocked — by hardware, or for a null
+sink by system time — and emits samples whether or not anything plays. Silence is not the absence of
+samples; it is samples whose value is zero. The quiet part cannot be skipped, because the receiver
+needs to know how much time passed.
+
+The consequence is load-bearing: **byte count is the timeline.** In a continuous stream the receiver
+plays what arrives at the known rate and stays in sync with no timestamps and no clock protocol.
+
+**Clock drift exists regardless.** The remote sink runs on the remote's clock, the local WASAPI
+device on its own crystal, and over an hour they disagree. §12's fixed ring buffer that **drops on
+overrun** is the right primitive: drift is absorbed as a rare brief glitch rather than an unbounded
+queue or a growing delay. That behaviour is the runnable check this path leaves behind — feed it a
+stream slightly faster than realtime and assert the buffer never grows.
+
+**A headless server usually has no sound card**, so the sound is mostly emitted into a **null sink** —
+a virtual device applications play into, captured from its monitor source. The same trick as the
+framebuffer: a virtual screen with no monitor, now a virtual speaker with no card. It works with zero
+hardware present, because `module-null-sink` is clocked by system time. cmote **offers** to load it
+and never does so silently — the exact command is shown first, the same shape as the shell-integration
+dialog (§95, §96), and declining still leaves a working picture.
+
+**Capture at the sink's native rate and channel count. Nothing is converted on the remote.** PipeWire
+defaults to 48 kHz and PulseAudio historically to 44.1, so any hardcoded number resamples on one of
+them — spending the scarce resource to reach a figure that was picked rather than found. Fallback
+when the rate cannot be read is 48 kHz stereo. `s16` on the wire, because a sink running float32
+costs a per-sample scale rather than a resample and halves the bytes. Every conversion lands on this
+machine, where WASAPI does it in the audio engine anyway.
+
+**Opus is refused on §11 grounds.** Every Opus crate compiles C — `audiopus` needs CMake plus a C
+compiler and assembler; `opus` and `magnum-opus` vendor libopus — and no pure-Rust Opus exists. The
+NASM-free portable build is not spent on a convenience feature.
+
+**FLAC is accepted, because the facts were checked rather than assumed.** The `flac` tool is **441 kB
+installed** on Debian — affordable on any box that can run `Xvnc` — against `ffmpeg` at 2.7 MB plus a
+16.6 MB `libavcodec61`, so `flac` is the tool and ffmpeg is not. At `-0` the block is 1152 samples,
+**24 ms** at 48 kHz, not the 85 ms of the higher levels. And `claxon`, `symphonia` and `flacenc` were
+**compiled** on `x86_64-pc-windows-msvc` with no C compiler, CMake or NASM invoked — verified, not
+read. Used when `flac` is present, raw PCM when it is not: an addition, never a replacement.
+
+**`claxon` decodes, and the resync is ours.** Apache-2.0, already in `deny.toml`'s allow list, zero
+dependencies. It does not resynchronise — its own documentation says it assumes the reader starts at
+a frame header — so we scan for RFC 9639's byte-aligned 15-bit sync code and validate the header
+CRC-8, roughly forty lines of exactly the specification-reading this codebase does routinely. The
+alternative was `symphonia`, which resyncs internally but is **MPL-2.0 and not in the allow list** —
+and that file's comment is a standing instruction that an unlisted licence is a decision a human
+makes, not a silent default. Frames are remote-controlled input either way, so block size and channel
+count are bounded on arrival, the same reasoning §53 applies to images.
+
+**Capture is gated on sink activity with a lingering timeout**, so the pipeline is not running while
+nothing plays — that saves remote CPU, which is the scarce resource, and the linger stops short gaps
+between sounds from restarting it.
+
+**Picture and sound cannot be synchronised, ever.** RFB carries no timestamps; there is nothing to
+sync against. Invisible for desktop use, and it means lip-sync is not something this can offer.
+
+### The window
+
+**A separate OS window**, not a tab. A framebuffer needs the whole keyboard and its own fullscreen,
+and both would fight a tab strip and the focus ring §50 depends on. This is the largest structural
+cost in the section — cmote has been single-window — and it is paid once.
+
+**Initial size is half the Monitor it opens on, in physical pixels, 1:1, floor 640×480, even
+dimensions.** Physical rather than logical because on a 150% Monitor the logical reading gives a
+small framebuffer scaled up and blurry; the remote's own font settings are the right place to fix
+small text, and a blurry remote desktop is the worse failure.
+
+**On resize: scale live while dragging, resize the framebuffer once on release.** Resizing the
+framebuffer makes `Xvnc` reallocate and resend the whole screen, so following the drag continuously
+would hammer the constrained box; scaling is free here and the blur exists only while the mouse
+button is down, which is the moment nobody is reading anything. The resize itself uses
+ExtendedDesktopSize (-308), which is ours because `vnc-rs` does not have it.
+
+**The cursor is drawn locally** via the cursor pseudo-encoding, so the pointer moves with zero
+latency instead of a round-trip per mouse move. The single biggest perceived-latency win available,
+and cmote already draws its own cursors (§51, §119, §120).
+
+**Fullscreen takes the Monitor the window currently occupies**, resizing the framebuffer to it on
+entry and back on exit under the same on-release rule. **One framebuffer only** — RFB multi-screen
+exists and doubles everything for a case nobody asked for.
+
+**The window opens immediately and narrates** while dialling and probing, the same shape as a
+session's dialling phase (§134). A host with nothing graphical gets a plain statement of what is
+missing and no retry loop.
+
+**It starts from the session's own menu**, beside the file panes, because a Remote Monitor rides an
+existing session rather than creating one. The framebuffer picker appears there.
+
+### What the Target remembers
+
+The **Target** is extended again, as §22 and §47 already extended it: framebuffer size, update
+cadence, grab chord, JPEG quality, audio on or off, close-on-disconnect and its timeout, and whether
+to reattach. Same file, same lineage, no new store.
+
+Its definition says **never a secret**, and that clause is live rather than decorative: it is part of
+why the socket replaced a password. A VNC password in the Target would break the definition, and in
+the vault would need handling of its own.
+
+### Nothing is built until the number says so
+
+The premise — that a CPU-poor box can serve a desktop — is unevidenced, and the house rule is measure
+before designing the fix. So the first work is a measurement session against a deliberately
+constrained host, and it is allowed to return "no".
+
+What gets measured:
+
+  * `Xvnc` idle RSS, and CPU at rest with a client attached.
+  * CPU while a window is dragged, and while text scrolls.
+  * Bytes per second per encoding — ZRLE against Tight, on UI content and on a video.
+  * `parec` plus `flac -0` on a silent sink, and on real audio: the CPU cost of the sound path.
+
+The cadence dial's endpoints come out of the first two. Whether FLAC earns its place comes out of the
+last. And if a near-idle `Xvnc` really costs half a small VPS, that is not a tuning problem, it is
+the answer — much cheaper to learn now than after an RFB client exists.
+
+### What to keep
+
+**The protocol was chosen on the server's side, not the client's.** IronRDP is the better-engineered
+library and RDP is the better-featured protocol, and neither mattered: what decided it was three
+processes against one, root against no root, and a second authentication that §45–§47 would have had
+to be satisfied for. When two options differ mostly at the far end, compare the far ends.
+
+**A remote desktop is a damage model, and the moment it becomes a video stream the constraints are
+gone.** Everything that makes this affordable — idle costing nothing, `CopyRect` costing nothing,
+ZRLE beating general-purpose compression on flat colour — follows from sending what changed rather
+than sending frames.
+
+**"Loopback" is not a permission boundary, and a filesystem path is.** The whole security posture of
+this feature is one substitution: a Unix socket at 0600 inside a 0700 directory, instead of a TCP
+port every local account can reach. The password scheme that looks like the alternative is 56-bit
+DES.
+
+**A flag that is silently ignored is worse than one that errors.** `-rfbunixpath` does not disable
+TCP, and nothing says so at runtime. That is why the check after launch is for the *absence of a
+listening port* rather than for the success of the command.
+
+**Audio has no damage model.** Silence occupies time and therefore occupies the stream, which is why
+byte count can be the timeline and why the ring buffer drops rather than grows. The picture and the
+sound look like the same problem and are not.
+
+**Four facts overturned four confident recommendations, and each was checked rather than argued.**
+No static Xvnc binary exists, so cmote does not upload one. `-IdleTimeout` drops the connection, not
+the server, so the flag is `-MaxDisconnectionTime`. The `flac` tool is 441 kB and its `-0` block is
+24 ms, so the disk and latency objections were wrong. And cmote already negotiates zlib (§167), so
+silence was never costing full bandwidth. A design argued without fact-finding would have shipped all
+four mistakes.
