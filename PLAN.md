@@ -21126,6 +21126,26 @@ What gets measured:
   * Bytes per second per encoding — ZRLE against Tight, on UI content and on a video.
   * `parec` plus `flac -0` on a silent sink, and on real audio: the CPU cost of the sound path.
 
+`tools/measure-remote-monitor.sh` produces all of it, and is versioned here because this section's
+verdict is its output. It needs no root and installs nothing, which is the same refusal the feature
+itself makes. Three things about it are worth knowing before the numbers are read:
+
+  * **The idle phase needs no client at all**, which is deliberate — the figure that gates the
+    feature is the one a framebuffer costs when nobody is looking, and making it depend on a viewer
+    would have made the cheapest number the hardest to get.
+  * **The two FLAC bounds need no sound card and no audio daemon.** Digital silence out of
+    `/dev/zero` is the best case and white noise out of `/dev/urandom` is the worst, and every real
+    desktop sound sits between them. So the sound path can be priced on a host with no audio stack
+    whatsoever.
+  * **It runs this section's own security check for real** — it counts the TCP ports `Xvnc` holds
+    and reports a finding if `-rfbport -1` was ignored. TigerVNC issue #1374 says 1.12.x regressed
+    exactly that, and 1.16.x is unconfirmed, so that check may return a discovery rather than a
+    formality.
+
+The phase that attaches a viewer is opt-in, because it has to expose a loopback TCP port — the very
+exposure this design exists to avoid. A measurement posture is not a shipping posture, and the script
+says so where it starts.
+
 The cadence dial's endpoints come out of the first two. Whether FLAC earns its place comes out of the
 last. And if a near-idle `Xvnc` really costs half a small VPS, that is not a tuning problem, it is
 the answer — much cheaper to learn now than after an RFB client exists.
