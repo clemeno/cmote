@@ -197,13 +197,9 @@ for vProg in xterm xeyes xclock xlogo x11perf glxgears firefox; do
 done
 say_fact "X clients found" "${vClients:- NONE}"
 
+# Every finding prints before the one verdict that can stop the run, so a host
+# missing two things learns both in one pass instead of one per install.
 printf '\n'
-if [ -z "$vXvnc" ]; then
-	echo "  VERDICT: no Xvnc. §175 refuses to install one, so this host needs"
-	echo "           'tigervnc-standalone-server' (Debian) or 'tigervnc' (Arch)"
-	echo "           before the gate can be measured. Nothing else ran."
-	exit 1
-fi
 if [ -z "$vLibX11" ]; then
 	echo "  VERDICT: no libX11. This is §175's third world — there is nothing"
 	echo "           graphical to display, so the feature is impossible here by"
@@ -212,7 +208,20 @@ fi
 if [ -z "$vClients" ]; then
 	echo "  NOTE: no X clients found, so the 'under load' numbers cannot be"
 	echo "        produced on this host. Phase 1's idle figures still stand,"
-	echo "        and they are the ones that gate the feature."
+	echo "        and they are the ones that gate the feature. 'xterm' is the"
+	echo "        package name on every family below and is the smallest thing"
+	echo "        that draws."
+fi
+if [ -z "$vXvnc" ]; then
+	echo "  VERDICT: no Xvnc. §175 refuses to install a display server, so that"
+	echo "           is the admin's decision and not this script's:"
+	echo "             RHEL / CentOS / Fedora   tigervnc-server"
+	echo "                                      (tigervnc-server-minimal is the"
+	echo "                                       Xvnc-only subpackage)"
+	echo "             Debian / Ubuntu          tigervnc-standalone-server"
+	echo "             Arch                     tigervnc"
+	echo "           No phase after this one ran."
+	exit 1
 fi
 
 # ── Phase 1: Xvnc alone, nobody attached ─────────────────────────────────────
