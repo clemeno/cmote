@@ -18,7 +18,10 @@ import random
 import shutil
 import zipfile
 
-kOutDir = "C:\\tmp\\cmote-upload-test"      # fixture root; outside the repo on purpose
+# Fixture root: beside this script, so it has one home on every machine instead of a path that
+# only existed on one. Its CONTENTS are gitignored - 10.4 MiB of deliberately incompressible zips
+# has no business in history when this file regenerates them byte-identically.
+kOutDir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cmote-upload-test")
 kTreeDir = "cmote-upload-tree"              # subfolder, for the folder-drop (tree walk) path
 kChunk = 32 * 1024                          # cmote's upload CHUNK, the packet size that matters
 

@@ -19,5 +19,14 @@
 # good. The artifacts are built from a tag, never committed.
 /dist/
 
+# The drag-and-drop upload fixture, generated beside its generator by
+# `tools/gen_upload_test.py`. Ignored for the same reason as `/dist/` above, only more so: it is
+# 10.4 MiB across 42 files and it is zips of RANDOM bytes by design, so git's own compression gains
+# nothing and one `git add -A` would put every byte of it in history for good — where a binary blob
+# cannot be removed again without rewriting it. The generator seeds `random.seed(0xC0FFEE)` and
+# reproduces the fixture byte-identically, so the script is the artifact worth versioning and the
+# output never is.
+/tools/cmote-upload-test/
+
 # Note: Cargo.lock IS committed (this is a binary crate) for reproducible,
 # auditable builds — see PLAN §12.
