@@ -3410,9 +3410,11 @@ pub enum Message {
 	// --- terminal mouse: text selection + clipboard (§10) ---
 	/// The pointer moved over the grid; the payload is its grid-local position.
 	GridMoved(iced::Point),
-	/// The left button went down on the grid — begin a selection at the hovered cell.
+	/// The left button went down on the grid — begin a selection at the hovered cell, or with Shift
+	/// held stretch the current one to it (§177).
 	GridPressed,
-	/// The left button came back up — finish the selection (a bare click clears it).
+	/// The left button came back up — finish the selection (a bare click selects nothing, and
+	/// anchors a Shift+click, §177).
 	GridReleased,
 	/// The right button went down on the grid — open the context menu at the pointer.
 	GridRightPressed,
@@ -5520,15 +5522,26 @@ impl Tab {
 				// channel, the same path a keystroke takes. The same bytes may carry a cwd
 				// announcement, so read the (possibly new) directory out before the borrow
 				// ends and let the tree follow it (§18).
-				let (cwd, replies) = match self.terminal_mut() {
+				let (cwd, replies, switched) = match self.terminal_mut() {
 					Some(terminal) => {
+						let was_alternate = terminal.screen().is_alternate();
 						let replies = terminal.process(&bytes);
-						(terminal.cwd().map(str::to_owned), replies)
+						let switched = terminal.screen().is_alternate() != was_alternate;
+						(terminal.cwd().map(str::to_owned), replies, switched)
 					}
-					None => (None, Vec::new()),
+					None => (None, Vec::new(), false),
 				};
 				if !replies.is_empty() {
 					self.send_command(SshCommand::Input(replies));
+				}
+				// The main and the alternate screen are two documents, so a selection's lines name the
+				// other one's text after a switch: dropped, like a reflow's (§43), or a drag made in
+				// `less` would stay highlighted — and copyable — over the shell's history, and a
+				// Shift+click would stretch from it (§177). `ponytail:` a background identity's (§45)
+				// selection is not dropped on ITS switch; it shows only once that identity is chosen.
+				if switched {
+					self.set_selection(None);
+					self.set_selecting(false);
 				}
 				// That chunk changed the document the find bar searched, so its match list is now a
 				// description of an older one (§44). Marked, not re-scanned here: the scan walks every
@@ -6587,8 +6600,9 @@ impl Tab {
 		}
 	}
 
-	/// Begin a selection at the hovered cell (§10). Also closes any open context
-	/// menu — a fresh press on the grid dismisses it — and the find bar (§35).
+	/// Begin a selection at the hovered cell (§10), or with Shift held stretch the current one to it
+	/// (§177). Also closes any open context menu — a fresh press on the grid dismisses it — and the
+	/// find bar (§35).
 	fn on_grid_pressed(&mut self) {
 		self.menu = None;
 		// The find bar closes on a click-away too, like the menus (§35). It holds the keyboard while
@@ -6607,8 +6621,12 @@ impl Tab {
 			return;
 		};
 		// The cell pressed on, as the document position it is showing (§40) — resolved before any of
-		// the branches below, so the one place a mouse selection is anchored reads the viewport once.
-		let anchor = self.hover_cell().to_doc(terminal.screen());
+		// the branches below, so every one of them reads the viewport once.
+		let pressed = self.hover_cell().to_doc(terminal.screen());
+		// Under a program that asked for the mouse, Shift is what takes it back (§9), so a Shift+press
+		// there is an ordinary press and not a stretch (§177).
+		let stretches = self.modifiers.shift()
+			&& terminal.screen().mouse_mode() == term::screen::MouseMode::None;
 		// A click on a prompt tick in the left padding gutter selects that command's output (§34)
 		// instead of starting a text selection. The ticks live inside `GRID_PADDING`; a press there
 		// on a row whose prompt has a finished command resolves to it, and anything else — the gutter
@@ -6628,6 +6646,15 @@ impl Tab {
 			self.follow_link(&uri);
 			return;
 		}
+		// Shift+click stretches the selection from its anchor — where the last click or drag began, or
+		// the first cell of a word, a line, an output or a search hit — to the cell pressed, in either
+		// direction and across lines (§177). With nothing to stretch it is an ordinary press, which
+		// anchors the next one. `ponytail:` the anchor stays put, where some terminals move whichever
+		// end is nearer; worth it if growing a word or an output span backwards is missed.
+		if stretches && let Some(selection) = self.selection() {
+			self.set_selection(Some(selection.reaching(pressed)));
+			return;
+		}
 		// A double click selects the word under the pointer, a triple the whole logical line (§42).
 		// The count is kept here because `mouse_area` reports each press on its own; the expansion
 		// itself is `ui::selection`'s, and what it hands back is an ordinary selection — so the grid
@@ -6644,10 +6671,10 @@ impl Tab {
 		let expanded = self.terminal().and_then(|terminal| match click {
 			ui::selection::Click::Single => None,
 			ui::selection::Click::Double => {
-				ui::selection::Selection::word(terminal.screen(), anchor)
+				ui::selection::Selection::word(terminal.screen(), pressed)
 			}
 			ui::selection::Click::Triple => {
-				ui::selection::Selection::line(terminal.screen(), anchor)
+				ui::selection::Selection::line(terminal.screen(), pressed)
 			}
 		});
 		if let Some(selection) = expanded {
@@ -6659,7 +6686,7 @@ impl Tab {
 			self.set_selecting(false);
 			return;
 		}
-		self.set_selection(Some(ui::selection::Selection::new(anchor)));
+		self.set_selection(Some(ui::selection::Selection::new(pressed)));
 		self.set_selecting(true);
 	}
 
@@ -6723,16 +6750,11 @@ impl Tab {
 		}
 	}
 
-	/// Finish a drag (§10). A press-release with no movement leaves an empty
-	/// selection (anchor == head), which we clear so a plain click deselects.
+	/// Finish a drag (§10). A press-release with no movement leaves an empty selection
+	/// (anchor == head), which highlights and copies nothing, so a plain click still deselects. It is
+	/// kept rather than cleared because its anchor is where a Shift+click stretches from (§177).
 	fn on_grid_released(&mut self) {
 		self.set_selecting(false);
-		if self
-			.selection()
-			.is_some_and(|selection| selection.is_empty())
-		{
-			self.set_selection(None);
-		}
 	}
 
 	/// Select a finished command's output as a text selection (§34) — the Ctrl+Shift+O keybind. The
@@ -9122,6 +9144,86 @@ mod tests {
 		let screen = app.terminal().unwrap().screen();
 		let selection = app.selection().expect("the triple click selected a line");
 		assert_eq!(selection.extract(screen), "cat /etc/hosts");
+	}
+
+	/// A click, then a Shift+click elsewhere, selects everything between them with both end cells
+	/// included (§177) — forwards across a line break, backwards, and onto the anchor's own cell, which
+	/// selects that one cell rather than nothing.
+	#[test]
+	fn a_shift_click_selects_from_the_last_click_to_the_cell_pressed() {
+		let (mut app, _rx) = app_with_terminal(16);
+		app.terminal_mut()
+			.unwrap()
+			.process(b"alpha beta\r\ngamma delta");
+		// Clear of the left gutter, so these are ordinary grid presses and not prompt ticks (§34).
+		app.pointer = iced::Point::new(50.0, 5.0);
+		let click = |app: &mut Tab, row: u16, col: u16| {
+			app.set_hover_cell(ui::selection::ScreenSpot { row, col });
+			app.on_grid_pressed();
+			app.on_grid_released();
+			app.selection()
+				.map(|selection| selection.extract(app.terminal().unwrap().screen()))
+		};
+
+		assert_eq!(click(&mut app, 0, 6).as_deref(), Some(""), "a bare click");
+		app.modifiers = iced::keyboard::Modifiers::SHIFT;
+		assert_eq!(click(&mut app, 1, 4).as_deref(), Some("beta\ngamma"));
+		assert_eq!(click(&mut app, 0, 0).as_deref(), Some("alpha b"));
+		assert_eq!(click(&mut app, 0, 6).as_deref(), Some("b"));
+
+		// Under a program that asked for the mouse, Shift is how the mouse comes back (§9), so a
+		// Shift+press there starts a fresh selection rather than stretching the old one.
+		let _ = app.on_ssh_event(shell_output(b"\x1b[?1000h"));
+		assert_eq!(click(&mut app, 1, 4).as_deref(), Some(""));
+	}
+
+	/// The main and the alternate screen are two documents, so a switch drops the selection (§177):
+	/// its lines would name the other screen's text, for the highlight, a copy and a Shift+click alike.
+	#[test]
+	fn switching_screens_drops_the_selection() {
+		let (mut app, _rx) = app_with_terminal(16);
+		let _ = app.on_ssh_event(shell_output(b"alpha beta"));
+		app.set_selection(Some(ui::selection::Selection::spanning(
+			ui::selection::DocSpot { line: 0, col: 0 },
+			ui::selection::DocSpot { line: 0, col: 4 },
+		)));
+
+		let _ = app.on_ssh_event(shell_output(b"still the main screen"));
+		assert!(app.selection().is_some(), "ordinary output keeps it");
+		let _ = app.on_ssh_event(shell_output(b"\x1b[?1049h"));
+		assert!(
+			app.selection().is_none(),
+			"entering the alternate screen drops it"
+		);
+
+		app.set_selection(Some(ui::selection::Selection::new(
+			ui::selection::DocSpot { line: 0, col: 0 },
+		)));
+		let _ = app.on_ssh_event(shell_output(b"\x1b[?1049l"));
+		assert!(app.selection().is_none(), "and so does leaving it");
+	}
+
+	/// A bare click keeps its empty selection now, as the anchor of a Shift+click (§177), and the
+	/// click that hands the keyboard back to the shell is the commonest one there is — so Ctrl+C after
+	/// it must still be the interrupt, not a copy of nothing.
+	#[test]
+	fn ctrl_c_after_a_bare_click_is_still_the_interrupt() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.terminal_mut().unwrap().process(b"alpha beta");
+		// Clear of the left gutter, so this is an ordinary grid press and not a prompt tick (§34).
+		app.pointer = iced::Point::new(50.0, 5.0);
+		app.set_hover_cell(ui::selection::ScreenSpot { row: 0, col: 2 });
+		app.on_grid_pressed();
+		app.on_grid_released();
+		assert!(app.selection().is_some(), "the click kept its anchor");
+
+		let _ = app.on_key(character_press(
+			"c",
+			iced::keyboard::key::Code::KeyC,
+			iced::keyboard::Modifiers::CTRL,
+		));
+
+		assert_eq!(next_input(&mut rx), Some(b"\x03".to_vec()));
 	}
 
 	/// A resize reflows the scrollback, so an absolute document line recorded before it names other

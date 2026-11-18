@@ -172,10 +172,12 @@ enum Origin {
 	Expanded,
 }
 
-/// A drag selection: `anchor` is the position the drag started on, `head` is where the
-/// pointer is now. Either can be the visually-earlier one (dragging up/left is
-/// allowed), so all queries normalize to an ordered (start, end) pair first. Both are document
-/// positions (§40), so the selection keeps covering its own text however the view then scrolls.
+/// A text selection: `anchor` is where it started — the cell a drag was pressed on, or the first cell
+/// of a range (`spanning`) — and `head` its other end, where the pointer is during a drag. The anchor
+/// is what a Shift+click stretches from (§177). Either can be the visually-earlier one (dragging
+/// up/left is allowed), so all queries normalize to an ordered (start, end) pair first. Both are
+/// document positions (§40), so the selection keeps covering its own text however the view then
+/// scrolls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
 	anchor: DocSpot,
@@ -206,15 +208,22 @@ impl Selection {
 	}
 
 	/// A selection over a range something else already worked out, rather than one a pointer dragged:
-	/// a command's output (§34), a search hit (§35), a word or a line (§42). Inclusive of both ends,
-	/// and — unlike a drag — never empty, so a range one cell wide is highlighted and copyable instead
-	/// of reading as "nothing selected" (see `Origin`).
+	/// a command's output (§34), a search hit (§35), a word or a line (§42), a Shift+click (§177).
+	/// Inclusive of both ends, and — unlike a drag — never empty, so a range one cell wide is
+	/// highlighted and copyable instead of reading as "nothing selected" (see `Origin`).
 	pub fn spanning(start: DocSpot, end: DocSpot) -> Self {
 		Self {
 			anchor: start,
 			head: end,
 			origin: Origin::Expanded,
 		}
+	}
+
+	/// This selection stretched from its own anchor to `head`, both cells included — a Shift+click
+	/// (§177). A known range rather than a drag, so a Shift+click back onto the anchor's cell selects
+	/// that cell instead of reading as "nothing selected" (see `Origin`).
+	pub fn reaching(self, head: DocSpot) -> Self {
+		Self::spanning(self.anchor, head)
 	}
 
 	/// The word around `spot`, as a double click selects it (§42), or `None` when there is no word
@@ -279,9 +288,10 @@ impl Selection {
 		))
 	}
 
-	/// True when nothing is actually selected — a DRAG whose head never left its anchor cell. Copy is
-	/// disabled in this state and a plain click clears the selection. A word or line selection is
-	/// never empty, even when it covers a single cell (see `Origin`).
+	/// True when nothing is actually selected — a DRAG whose head never left its anchor cell, which is
+	/// what a plain click leaves: nothing highlighted, Copy disabled, and only its anchor kept, for a
+	/// Shift+click to stretch from (§177). A word or line selection is never empty, even when it covers
+	/// a single cell (see `Origin`).
 	pub fn is_empty(&self) -> bool {
 		self.origin == Origin::Drag && self.anchor == self.head
 	}

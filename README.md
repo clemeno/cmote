@@ -545,6 +545,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | Gesture | What it does |
 |---|---|
 | Drag across the grid | Select text (highlighted in place) |
+| Click, then **Shift+click** elsewhere | Select everything between the two cells, both included — forwards or backwards, across lines |
 | Right-click | Context menu: Copy / Paste / Upload… (into the shell's directory); on a link cell, **Open link / Copy link** too |
 | **Ctrl+click** a link | Open an OSC 8 hyperlink in the browser (http/https/mailto only) |
 | **Ctrl+C** | Copy the selection as styled HTML + plain text (rich paste keeps colours); with no selection, the shell's interrupt instead. Clears the selection after copying |

@@ -21303,3 +21303,76 @@ it.
 **A major version is a claim about someone's API, not ours.** russh's two majors broke the server half
 of a library cmote uses only as a client. The release notes said "breaking" four times, and the compiler
 said nothing at all.
+
+## §177 — Click, then Shift+click: the selection between two cells
+
+A long selection used to need a steady drag the whole way, scrolling included. Every terminal and editor
+also takes **click here, Shift+click there**, and cmote now does: everything between the two cells is
+selected, **both cells included**, in reading order whichever way round they were clicked, across as many
+lines as lie between. Copy then copies it like any other selection (§10).
+
+### The anchor was already there, and was being thrown away (`app`, `ui/selection.rs`)
+
+A press already built `Selection::new(anchor)`. What lost it was the release: a click that never moved
+left an *empty* selection, and `on_grid_released` cleared it to `None` so that a click would deselect. It
+no longer clears it. An empty selection already highlights nothing, copies nothing, leaves Copy disabled
+and lets Ctrl+C through as the interrupt — every consumer reaches `is_empty`, directly or through
+`contains` and `extract`, and the drag path is gated by `selecting` — so the click still deselects, and
+its anchor survives for the Shift+click to stretch from. The Ctrl+C guard is the one that now carries
+every click, the one that hands the keyboard back to the shell included, so it has a test of its own.
+
+The Shift+click itself is `Selection::reaching`: the old anchor to the pressed cell, built with
+`spanning` rather than as a drag, so a Shift+click back onto the anchor's own cell selects that one cell
+instead of reading as nothing. The anchor of a word, a line, a command's output (§34) or a search hit (§35)
+is its first cell, so a Shift+click stretches those from their start.
+
+### Two places the anchor must not survive
+
+The two-axis review of the first cut found both; neither shows in a test that only clicks.
+
+- **Under a mouse-aware program** (vim with `mouse=a`, `htop`) a plain click is the program's (§9), and
+  Shift is how the mouse comes back to cmote. There every Shift+press used to start a fresh selection;
+  stretching instead would have made each new Shift+drag grow from the last one, with no press left
+  that starts over. So the stretch needs `MouseMode::None`, and under such a program a Shift+press is
+  an ordinary press, as before.
+- **Across a switch to or from the alternate screen.** The two screens are two documents: on the
+  alternate one line N is simply row N, on the main one it is history. A selection — or a bare click's
+  anchor — made on one names the other's text after the switch. That was true before §177 too: a drag in
+  `less`, kept after `q`, highlighted and copied lines of the shell's history nobody had selected. The
+  foreground output arm now compares `is_alternate` either side of `process` and drops the selection on a
+  change, the same answer §43 gives a reflow. `ponytail:` a background identity's (§45) emulator is fed
+  elsewhere and keeps its selection through its own switch; it would show only once that identity is
+  chosen again.
+
+Each guard was probed on its own line: the release clearing restored (`left: None` against `Some("")`
+for the bare click), `reaching` built as a drag (`Some("")` against `Some("b")` on the anchor's own
+cell), the Shift branch disabled (`Some("")` against `Some("beta\ngamma")`), the mouse-mode test removed
+(`Some("beta\ngamma")` against `Some("")`), and the screen-switch drop removed (the "entering the
+alternate screen drops it" assert). A second review, by the pr-review-toolkit agents, found the Ctrl+C
+guard untested: `ctrl_c_after_a_bare_click_is_still_the_interrupt`, probed by turning the guard into
+`is_some`.
+
+### What it does not do
+
+- **No replacing the selected text.** A terminal shows what the remote printed; the text belongs to the
+  shell's line editor, and a paste goes to its cursor wherever the selection is. Overwriting a selected
+  span is an editor's gesture, and the editor tab (§32) already has it.
+- **The anchor is not the nearer end.** Some terminals move whichever end of an existing selection is
+  closer to the extending click; here the anchor stays put, so a Shift+click before a double-clicked
+  word keeps only the word's first cell of it. The click-then-Shift+click asked for works either way
+  round; growing a word or an output span backwards can follow if it is missed (`ponytail:` in
+  `on_grid_pressed`).
+- **No Shift+drag on from the press.** The Shift+click places the far end once; moving before the release
+  does not keep placing it. A plain drag already does that.
+- **An anchor ages with the document.** Line numbers count from the oldest line still held (§40), so
+  `clear` (its `CSI 3 J` drops the scrollback) and a history at its cap both move every stored line,
+  and an old anchor then names other text. Every selection has had that limit since §40; what is new is
+  an anchor nobody sees, kept for longer. A fresh click re-anchors, which is how the gesture starts
+  anyway.
+
+### What to keep
+
+**Keeping state alive is a change to every place that state can go stale.** The feature was one deleted
+`if` and one new branch; the review's findings were both about where the newly long-lived anchor would
+travel — into a program's mouse mode and across a screen switch. The question to ask of a value that
+used to be thrown away is where it can now be read from that it never was.
