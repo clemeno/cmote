@@ -52,7 +52,7 @@ pedantic = "deny"
 # format is needed. Its `secrecy` re-export (`age::secrecy`) carries the master passphrase into
 # the API without a plaintext copy lingering.
 #
-# HELD at 0.11 while 0.12.1 is out (PLAN §142, re-tested §172), and not by preference — 0.12 cannot
+# HELD at 0.11 while 0.12.1 is out (PLAN §142, re-tested §172 and §176), and not by preference — 0.12 cannot
 # be RESOLVED alongside russh. age 0.12 adds post-quantum recipients and so takes `ml-kem 0.2`, russh
 # takes `ml-kem 0.3`, and both depend on the same `kem` crate, which cargo therefore unifies to one
 # version. There is no feature to turn the post-quantum path off — `ml-kem` is a hard dependency of
@@ -172,7 +172,10 @@ open = "5"
 # (§11). `image` is here too, but iced pulls it in deliberately WITHOUT codecs (§41), so it cannot
 # read a PNG and turning its `png` feature on would only add this crate behind another layer.
 png = "0.18.1"
-rfd = "0.17.2"
+# The native file and folder pickers: keys and certificates (PLAN §7), uploads (§17) and downloads
+# (§19). 0.18 (PLAN §176) changed no API cmote calls; it raised the MSRV to 1.92 and added an opt-in
+# GTK4 backend that is Linux-only and not built here.
+rfd = "0.18.0"
 # A pseudo-terminal on THIS machine, for the local shells the home screen's Local bar opens
 # (PLAN §103). cmote's whole terminal side already speaks to a pty — the remote one SSH asks the
 # server for — so a local session needs exactly the same thing without the network: a pty pair, a
@@ -204,7 +207,12 @@ portable-pty = "0.9"
 # certificate presents it INSTEAD of a bare key. cmote refuses the certificate arm — see
 # `ssh::client::Handler::check_server_key` for why pinning the key inside one would be the wrong
 # answer, and why the arm cannot currently be reached at all.
-russh = { version = "0.63.1", default-features = false, features = ["ring", "flate2", "rsa"] }
+#
+# 0.65 (PLAN §176) broke nothing cmote uses: its breaks are on the SERVER side (`auth_publickey*`
+# take new key types), plus two Cargo features cmote never enabled (`async-trait`, and
+# `legacy-ed25519-pkcs8-parser`, so the old-layout ed25519 keys it parsed already failed here).
+# What does reach us is 0.65.2 moving `rsa` to its 0.10 release, which retired the Marvin advisory.
+russh = { version = "0.65.2", default-features = false, features = ["ring", "flate2", "rsa"] }
 # The sftp subsystem, used to upload a local file over its own channel (PLAN §17). It
 # rides on russh's `ChannelStream`, so it adds a protocol — not a second SSH stack.
 #

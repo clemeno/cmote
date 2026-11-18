@@ -117,7 +117,7 @@ fn ppk_is_encrypted(text: &str) -> bool {
 /// failure on an unencrypted file is a real, hard error.
 ///
 /// `ponytail:` `from_ppk` takes the passphrase as an owned `String` **by value**
-/// (`ssh-key` 0.7.0-rc.11: `from_ppk(ppk: impl AsRef<str>, passphrase: Option<String>)`),
+/// (`ssh-key` 0.7.0-rc.12: `from_ppk(ppk: impl AsRef<str>, passphrase: Option<String>)`),
 /// so a copy has to be made out of `Secret` for the call. That copy is a plain `String`
 /// dropped inside the crate without being zeroized — the one documented exception to §12's
 /// rule that a secret lives only in `Secret` or `Zeroizing`.

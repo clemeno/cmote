@@ -970,13 +970,11 @@ for free; the rest is deliberate.
   the advisory database is not scanned twice. This is where a Rust app's real risk lives
   — the dependency tree.
   - **Accepted advisories** (audit trail — CI ignores exactly these, so a *new* one still
-    fails): **RUSTSEC-2023-0071** — the `rsa` "Marvin" timing side-channel, pulled by
-    russh's `rsa` feature for RSA key auth (§7). No fixed version exists upstream; the
-    attack needs precise timing of our RSA private-key operations, and there is no patch
-    to take, so the risk is accepted until `rsa` ships a fix (or RSA key support is
-    dropped). **RUSTSEC-2024-0436** (`paste`) and **RUSTSEC-2026-0192** (`ttf-parser`) —
+    fails): **RUSTSEC-2024-0436** (`paste`) and **RUSTSEC-2026-0192** (`ttf-parser`) —
     both *unmaintained* warnings on transitive iced dependencies we don't control; neither
-    is a vulnerability.
+    is a vulnerability. **RUSTSEC-2023-0071**, the `rsa` "Marvin" timing side-channel
+    pulled by russh's `rsa` feature for RSA key auth (§7), was accepted here until `rsa`
+    shipped a fix: 0.10.0 did, russh 0.65.2 took it, and the ignore left CI (§176).
 - **Dependency purity vs. security (decided)** — the project is **not 100% Rust
   source**, and that is an accepted, deliberate trade: **security outranks purity**.
   Audited findings for `x86_64-pc-windows-msvc`:
@@ -21203,3 +21201,102 @@ the server, so the flag is `-MaxDisconnectionTime`. The `flac` tool is 441 kB an
 24 ms, so the disk and latency objections were wrong. And cmote already negotiates zlib (§167), so
 silence was never costing full bandwidth. A design argued without fact-finding would have shipped all
 four mistakes.
+
+## §176 — Every dependency asked again: two majors for nothing, one advisory retired, and the compiler moved first
+
+The second full sweep after §172, by the same method: the newest version of each direct dependency,
+read rather than trusted, then `cargo update` for everything semver-compatible. Four of the 21 had a
+semver-incompatible release out — `russh`, `rfd`, `age`, `base64` — and the other 17 were already at
+their newest.
+
+### The toolchain broke the gate before any dependency moved
+
+Rust 1.100 (2026-11-09) was installed between two commits, and `main` stopped passing its own gate with
+nothing in the tree changed — §114 exactly, and CI floats on stable, so it was red there too. rustfmt
+1.11 formats three spots differently, and clippy brought **305 errors from two lints**: `map_unwrap_or`
+now covers `.map(f).unwrap_or_default()` (11 sites, std's new `Option::map_or_default`), and the new
+`assert_is_empty` flags a bare `assert!(x.is_empty())` because a failure shows nothing of the value (294
+test lines). Answered in `f9e64aa` before any version moved, so the dependency commit is judged on its own.
+
+The asserts were rewritten as clippy suggests, `assert_eq!(x, [] as [T; 0])`, and **its `--fix` could not
+apply one of them**: it prints `T` as a crate-relative path (`term::rect::RectRequest`), which does not
+resolve from a test module, and it reverts the whole batch when the result fails to compile. So a script
+applied clippy's own JSON suggestions with the paths made `crate::`-absolute, and a second pass wrote a
+type short wherever its own module's `use super::*` already had it in scope — the long form had split most
+asserts over four lines. One site needed the type by hand: `params.bytes()` against a bare `[]` is
+ambiguous once serde_json adds a second `PartialEq` impl for `u8`. No lint was switched off, which
+AGENTS.md forbids; the alternative weighed was a message on each assert, which the lint also accepts.
+
+### Two majors, and not one line of code
+
+**russh 0.63.3 → 0.65.2** reads like a large change and was none for cmote. The breaks in 0.64 and 0.65
+are on the SERVER side — `Handler::auth_publickey_offered` and `auth_publickey` take new key types — plus
+two Cargo features cmote never enabled (`async-trait`, `legacy-ed25519-pkcs8-parser`). The behaviour
+changes were each checked against what cmote calls: `kex_done` now runs only after host-key verification,
+and cmote does not implement it; the agent's `lock`, `unlock`, `remove_identity` and friends now return
+the agent's failure, and cmote calls none of them — only `connect_*`, `request_identities` and signing.
+
+The one item that read like a user-visible change is not one here. 0.64 made **an ed25519 key in the old
+PKCS#8 layout a hard parse error**, but the fallback it removed was only ever compiled under
+`legacy-ed25519-pkcs8-parser` — not a default feature in 0.63.3, and never enabled by cmote — so such a
+key already failed to load. Checked in 0.63.3's own source (`keys/format/mod.rs`, the `#[cfg]` on the
+fallback) after a first draft of this section said otherwise.
+
+**rfd 0.17 → 0.18** changed no API cmote calls. It raised its MSRV to 1.92 and added a GTK4 backend that
+is Linux-only and not built for either of our targets.
+
+### The advisory that retired itself
+
+**`rsa` RUSTSEC-2023-0071, the Marvin timing side-channel, is gone from the tree.** It had been ignored
+in CI since §12, listed again in §142, and re-confirmed as having "no upstream fix" in §171. russh 0.65.2 moved `rsa` from
+0.10.0-rc.18 to the 0.10.0 release, and the advisory's own record reads `patched = [">= 0.10.0"]`. The
+check was `cargo audit` run **without** that ignore: exit 0, no vulnerability. So `ci.yml`'s `--ignore`
+went, with its comment, and the audit trail is two advisories long. An ignore whose advisory no longer
+matches never fails anything — it would have sat there indefinitely, silently also waiving any future
+match, unless somebody removed it on purpose.
+
+The tolerated warnings went the other way: `cargo audit` lists nine unmaintained or unsound crates where
+§172 listed four. The new five are `basic-toml`, `chrono`, and three zbus crates (`zbus_names`,
+`zvariant`, `zvariant_derive`). A bare `cargo deny check` reports a different seven, not a subset: it
+drops the zbus three (Linux-only, and deny is filtered to our two targets) and `lru`'s unsound advisory,
+and adds `paste` and `ttf-parser`, which audit sees only because CI tells it to ignore them. `deny.toml`'s
+note now names both lists. Why deny leaves `lru` out was not chased.
+
+### Both holds, re-run rather than re-read
+
+**age 0.12 is still blocked, by exactly the mechanism §172 recorded.** Re-tested in a throwaway copy of
+the manifest with age at 0.12 and russh at 0.65.2: the resolver again selects `ml-kem v0.2.1
+(available: v0.2.3)` — the 0.2 that §172 watched fail to compile; resolution was re-run here, the
+compile was not — because 0.2.2 and 0.2.3 pin
+`kem = "=0.3.0-pre.0"`, and russh 0.65's `ml-kem 0.3.4` holds `kem` at 0.3. Neither trigger §172
+named has fired. The copy lived in `.scratch/` so that the real lock was never touched by an experiment.
+
+**base64 stays at 0.22**: `alacritty_terminal` 0.26.0 is still its newest release and still requires
+`^0.22.0`.
+
+### Verified, and the one check not run
+
+Six gate steps green on the new lock with no code change — the one `src/` edit is the `ssh-key` version a
+`ponytail:` in `ssh::keyfile` quotes, rc.11 to rc.12, with `from_ppk`'s signature unchanged — 1848 tests,
+then `cargo deny check bans
+licenses sources` (`bans ok, licenses ok, sources ok`), `cargo audit` with the two remaining ignores
+(exit 0, nine allowed warnings), and `cargo metadata --locked` exit 0.
+
+**`cargo build --release --locked` was NOT run.** The machine had 4.5 GiB of commit free, below what an
+LTO link needs, and a debug test build of this session had already died near that ceiling with
+`memory allocation … failed` (exit `0xc0000409`, rust-analyzer holding 6 GiB). That is §171's blind spot,
+left open knowingly: the release workflow on the next tag is the first build of this lock with LTO.
+
+### What to keep
+
+**An ignore outlives its advisory as easily as a hold outlives its reason.** §172 found the `age` note
+arguing from a graph that had moved; here the CI ignore was arguing from a crate version that had moved.
+Re-running the check without the exception is the only way to find out, and it costs one command.
+
+**A toolchain update is a change to the tree.** Nothing in `src/` moved and 305 errors appeared. Doing
+that work first, in its own commit, is what lets the dependency commit say "no code change" and mean
+it.
+
+**A major version is a claim about someone's API, not ours.** russh's two majors broke the server half
+of a library cmote uses only as a client. The release notes said "breaking" four times, and the compiler
+said nothing at all.
