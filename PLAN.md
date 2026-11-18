@@ -5602,6 +5602,28 @@ that matters: a command starts with a word.
 The rule is one-way. Typing in the shell never moves the focus *to* a pane, because a pane has nothing to
 type into (its rename fields are modal and take the keyboard whole, §18, §19).
 
+### Ctrl+D in a pane means the shell, on the second press
+
+Ctrl+D is a combination, so `is_typing` lets it through to the pane, and neither pane has a meaning for it:
+the user logging out of a session whose files pane held the keyboard pressed it, then again, and nothing
+happened. Now Ctrl+D in a pane **hands the keyboard to the shell and is spent on the switch**, so the second
+press is the one that reaches the shell. Not forwarded the way a typed letter is, because at a shell prompt it
+ends the session: a press whose meaning was "back to the shell" must not also log out. Shift and Caps Lock
+change nothing — a pane has no Ctrl+Shift+D either — and on a local shell the spent press arms nothing:
+§104's probe listens only for the press that was actually sent.
+
+Spending the press is not enough on its own. Its auto-repeats arrive with the shell already focused, so a
+half-second hold would have sent the EOF anyway — the same hold §104 fixed on the home screen. The tab
+remembers the physical key of that press (`swallow_repeats_of`) and swallows its repeats until the next
+press, so a Ctrl+D pressed and held at the shell afterwards — paging in `less` — repeats as it always did.
+An `Option` of the key rather than a `bool` because `Tab` already holds three, clippy's
+`struct_excessive_bools` ceiling, and the key lets the guard say which repeats it swallows.
+
+**A field holding the keyboard keeps Ctrl+D.** The files pane's filter field and both rename fields are
+keyboard claims (§18, §19, §174): every key but Esc is theirs, Ctrl+D included. Breaking out of one would
+mean ending its typing state and moving the widget focus as well — Esc, or Enter in the filter, already does
+the first half, and then Ctrl+D works.
+
 ### A command from the terminal's surface means the terminal
 
 The grid's right-click menu — Copy selection, Paste, Upload…, and Open / Copy link on a link cell (§10, §17,

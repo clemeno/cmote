@@ -3060,6 +3060,12 @@ pub struct Tab {
 	panes: crate::panes::Panes,
 	/// Which of the three — shell, tree, files pane — the keyboard belongs to (§20).
 	focus: Focus,
+	/// The key of a Ctrl+D that handed the keyboard from a pane back to the shell, while it is still the
+	/// last key pressed (§50). Its auto-repeats are swallowed: a held key is one press (§104), and the
+	/// press was spent on the switch so that it would not log out. The key rather than a `bool` because
+	/// `Tab` already holds three, clippy's `struct_excessive_bools` ceiling, and naming the key lets the
+	/// guard say which repeats it swallows instead of leaning on "only the last key pressed repeats".
+	swallow_repeats_of: Option<iced::keyboard::key::Physical>,
 	/// Whether the OS window currently has focus (§23). Half of what "the shell is focused"
 	/// means for focus reporting — the other half is `focus == Focus::Terminal`. Started `true`
 	/// by `new` (a window opens focused); the first `Unfocused` event corrects it if not.
@@ -6187,6 +6193,17 @@ impl Tab {
 			return iced::Task::none();
 		}
 
+		// The auto-repeats of a Ctrl+D that handed the keyboard back from a pane (below) are that same
+		// press, and a held key is ONE press (§104): sent on, they would reach the shell as the EOF the
+		// switch was careful not to send, and a half-second hold would log out. Any other press ends the
+		// hold, so a Ctrl+D held at the shell later — paging in `less` — repeats as it always did.
+		if key_event == term::kitty::KeyEvent::Repeat
+			&& self.swallow_repeats_of == Some(physical_key)
+		{
+			return iced::Task::none();
+		}
+		self.swallow_repeats_of = None;
+
 		// Whoever is holding the keyboard gets it, and gets it before anything on this screen may
 		// see the key (§10, §17, §18, §27, §35) — see `KeyboardClaim`. Esc backs out of whichever it is;
 		// everything else waits for the field or the button that is holding it.
@@ -6244,6 +6261,25 @@ impl Tab {
 		// shell rather than being spent on the switch.
 		if !matches!(self.focus, Focus::Terminal) && is_typing(&key, modifiers) {
 			self.set_focus(Focus::Terminal);
+		}
+
+		// Ctrl+D takes the keyboard back to the shell too (§50), but is SPENT on the switch, so the next
+		// Ctrl+D is the one that reaches the shell. Neither pane has a meaning for it, so it used to
+		// vanish there — the user pressing it again and again at a shell prompt the keyboard was not on.
+		// Not forwarded like a typed letter, because at a shell prompt Ctrl+D ends the session: the press
+		// that only says "back to the shell" must not also log out. Shift is not excluded, unlike §104's
+		// probe below: a pane has no Ctrl+Shift+D either, and either spelling means "the shell". Either
+		// case too, like the pane's own Ctrl+A and Ctrl+F, so Caps Lock cannot make it vanish.
+		if !matches!(self.focus, Focus::Terminal)
+			&& modifiers.control()
+			&& !modifiers.alt()
+			&& !modifiers.logo()
+			&& matches!(&key, iced::keyboard::Key::Character(character)
+				if character.as_str().eq_ignore_ascii_case("d"))
+		{
+			self.set_focus(Focus::Terminal);
+			self.swallow_repeats_of = Some(physical_key);
+			return iced::Task::none();
 		}
 
 		// Ctrl+V is typing by another route, so it is answered from wherever the keyboard is (§50)
@@ -8632,6 +8668,120 @@ mod tests {
 				"the session is still up: the shell decides, not cmote ({local:?})"
 			);
 		}
+	}
+
+	// The same key event, as the OS's auto-repeat delivers it while the key stays down.
+	fn repeated(mut event: iced::keyboard::Event) -> iced::keyboard::Event {
+		if let iced::keyboard::Event::KeyPressed { repeat, .. } = &mut event {
+			*repeat = true;
+		}
+		event
+	}
+
+	/// Ctrl+D with a pane holding the keyboard hands it back to the shell and is spent on the switch, so the
+	/// SECOND Ctrl+D is the one that reaches the shell (§50). Before, every press vanished into the pane,
+	/// which has no meaning for the key. Both panes, and either case: Caps Lock turns the character into "D".
+	#[test]
+	fn ctrl_d_in_a_pane_hands_the_keyboard_back_and_the_next_one_reaches_the_shell() {
+		for (pane, character) in [(Focus::Files, "d"), (Focus::Tree, "D")] {
+			let (mut app, mut rx) = app_with_terminal(16);
+			app.focus = pane;
+
+			let _ = app.on_key(character_press(
+				character,
+				iced::keyboard::key::Code::KeyD,
+				iced::keyboard::Modifiers::CTRL,
+			));
+
+			assert_eq!(
+				app.focus,
+				Focus::Terminal,
+				"the shell has the keyboard ({pane:?})"
+			);
+			assert_eq!(
+				next_input(&mut rx),
+				None,
+				"and the switch sent nothing ({pane:?})"
+			);
+
+			let _ = app.on_key(ctrl_d());
+
+			assert_eq!(
+				next_input(&mut rx).as_deref(),
+				Some(&[0x04][..]),
+				"the second press is the EOF ({pane:?})"
+			);
+		}
+	}
+
+	/// On a local shell the press spent on the switch must not arm §104's EOF probe: nothing was sent, so
+	/// the shell's next output would be judged as the answer to a Ctrl+D it never got. The second press,
+	/// at the shell, arms it as any Ctrl+D there does.
+	#[test]
+	fn ctrl_d_from_a_pane_arms_the_eof_probe_only_on_the_press_that_reaches_the_shell() {
+		let (mut app, mut rx) = local_shell_tab(crate::local::shells::ShellKind::Pwsh);
+		app.focus = Focus::Files;
+
+		let _ = app.on_key(ctrl_d());
+
+		assert!(
+			app.session().is_none_or(|s| s.eof_probe.is_none()),
+			"the switch is not listening for an answer"
+		);
+		assert_eq!(next_input(&mut rx), None);
+
+		let _ = app.on_key(ctrl_d());
+
+		assert_eq!(next_input(&mut rx).as_deref(), Some(&[0x04][..]));
+		assert!(
+			app.session().is_some_and(|s| s.eof_probe.is_some()),
+			"the press that reached the shell is"
+		);
+	}
+
+	/// A held Ctrl+D in a pane is ONE press (§104). Its auto-repeats arrive with the shell already focused,
+	/// and must not reach the shell as the EOF the press was spent to avoid; a fresh press does.
+	#[test]
+	fn a_held_ctrl_d_in_a_pane_does_not_reach_the_shell() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.focus = Focus::Files;
+
+		let _ = app.on_key(ctrl_d());
+		let _ = app.on_key(repeated(ctrl_d()));
+
+		assert_eq!(
+			next_input(&mut rx),
+			None,
+			"the auto-repeat is the same press"
+		);
+
+		let _ = app.on_key(ctrl_d());
+
+		assert_eq!(
+			next_input(&mut rx).as_deref(),
+			Some(&[0x04][..]),
+			"a fresh press is the EOF"
+		);
+	}
+
+	/// The hold ends with the next press (§50, §104). A Ctrl+D pressed and held at the shell afterwards —
+	/// paging down in `less` — is the shell's own, repeats included. Without the reset, the key the switch
+	/// remembered would let that fresh press through and then swallow every repeat of it.
+	#[test]
+	fn a_ctrl_d_held_at_the_shell_after_the_switch_repeats() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.focus = Focus::Files;
+		let _ = app.on_key(ctrl_d());
+
+		let _ = app.on_key(ctrl_d());
+		let _ = app.on_key(repeated(ctrl_d()));
+
+		assert_eq!(next_input(&mut rx).as_deref(), Some(&[0x04][..]));
+		assert_eq!(
+			next_input(&mut rx).as_deref(),
+			Some(&[0x04][..]),
+			"the fresh press's repeat is the shell's"
+		);
 	}
 
 	/// The two presses §104 does not listen to, on the very shell it otherwise listens to.
