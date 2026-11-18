@@ -21282,10 +21282,13 @@ then `cargo deny check bans
 licenses sources` (`bans ok, licenses ok, sources ok`), `cargo audit` with the two remaining ignores
 (exit 0, nine allowed warnings), and `cargo metadata --locked` exit 0.
 
-**`cargo build --release --locked` was NOT run.** The machine had 4.5 GiB of commit free, below what an
-LTO link needs, and a debug test build of this session had already died near that ceiling with
-`memory allocation … failed` (exit `0xc0000409`, rust-analyzer holding 6 GiB). That is §171's blind spot,
-left open knowingly: the release workflow on the next tag is the first build of this lock with LTO.
+**`cargo build --release` was left out of the session, then run by hand.** The machine had 4.5 GiB of
+commit free, below what an LTO link needs, and a debug test build of this session had already died near
+that ceiling with `memory allocation … failed` (exit `0xc0000409`, rust-analyzer holding 6 GiB). So the
+commit went in with §171's blind spot named rather than closed, and the build ran afterwards from a
+terminal: finished in 9m 50s for an 18.3 MB `cmote.exe`, `Cargo.lock` untouched by it. Its one warning
+is the known future-incompatibility in `proc-macro-error2`, which arrives with age 0.11 and is what
+age 0.12 would remove.
 
 ### What to keep
 
