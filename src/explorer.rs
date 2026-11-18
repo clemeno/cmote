@@ -1036,10 +1036,10 @@ mod tests {
 		assert_eq!(explorer.selected(), Some("/home/user/src"));
 
 		// The shell re-announces the same directory at every prompt: no second fetch.
-		assert!(explorer.reveal_if_new("/home/user/src").is_empty());
+		assert_eq!(explorer.reveal_if_new("/home/user/src"), [] as [String; 0]);
 
 		// A native Windows directory does not belong on this POSIX tree.
-		assert!(explorer.reveal_if_new("C:\\Users\\CLEm").is_empty());
+		assert_eq!(explorer.reveal_if_new("C:\\Users\\CLEm"), [] as [String; 0]);
 	}
 
 	#[test]
@@ -1119,7 +1119,7 @@ mod tests {
 
 		// Every returned folder is now loading, so a second refresh before those fetches land asks
 		// for nothing — no piling up duplicate listings.
-		assert!(explorer.refresh_open().is_empty());
+		assert_eq!(explorer.refresh_open(), [] as [String; 0]);
 	}
 
 	#[test]

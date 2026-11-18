@@ -268,16 +268,16 @@ mod tests {
 	/// defined — the same thing `vte` does with its own out-of-range parameters.
 	#[test]
 	fn an_undefined_path_is_a_no_op() {
-		assert!(scan(b"\x1b[3 k").is_empty());
-		assert!(scan(b"\x1b[99 k").is_empty());
+		assert_eq!(scan(b"\x1b[3 k"), [] as [(usize, ScpRequest); 0]);
+		assert_eq!(scan(b"\x1b[99 k"), [] as [(usize, ScpRequest); 0]);
 	}
 
 	/// The intermediate is the whole test on the shape: `CSI Ps k` without it is a different
 	/// sequence, and a private marker makes it a private one.
 	#[test]
 	fn the_space_intermediate_is_required() {
-		assert!(scan(b"\x1b[2k").is_empty());
-		assert!(scan(b"\x1b[?2 k").is_empty());
+		assert_eq!(scan(b"\x1b[2k"), [] as [(usize, ScpRequest); 0]);
+		assert_eq!(scan(b"\x1b[?2 k"), [] as [(usize, ScpRequest); 0]);
 		assert!(scan(b"\x1b[2 q").is_empty(), "a different final byte");
 	}
 
@@ -292,9 +292,9 @@ mod tests {
 	#[test]
 	fn a_sequence_split_across_chunks_is_still_found() {
 		let mut scp = Scp::default();
-		assert!(scp.feed(b"\x1b").is_empty());
-		assert!(scp.feed(b"[2").is_empty());
-		assert!(scp.feed(b" ").is_empty());
+		assert_eq!(scp.feed(b"\x1b"), [] as [(usize, ScpRequest); 0]);
+		assert_eq!(scp.feed(b"[2"), [] as [(usize, ScpRequest); 0]);
+		assert_eq!(scp.feed(b" "), [] as [(usize, ScpRequest); 0]);
 		assert_eq!(
 			scp.feed(b"k"),
 			vec![(1, ScpRequest::Select(Path::RightToLeft))]
@@ -306,9 +306,9 @@ mod tests {
 	fn a_control_byte_does_not_abandon_the_sequence() {
 		// The reverse of what this asserted before §106: the engine reads a mid-sequence control byte
 		// through and keeps the sequence, so cmote does too, or the two disagree about the same bytes.
-		assert!(!scan(b"\x1b[2\x07 k").is_empty());
+		assert_ne!(scan(b"\x1b[2\x07 k"), [] as [(usize, ScpRequest); 0]);
 		// CAN and SUB are the only two that really cancel one.
-		assert!(scan(b"\x1b[2\x18 k").is_empty());
+		assert_eq!(scan(b"\x1b[2\x18 k"), [] as [(usize, ScpRequest); 0]);
 	}
 
 	/// A hostile stream must not be able to make the scanner buffer without bound — and the two
@@ -319,14 +319,14 @@ mod tests {
 		let mut many = b"\x1b[".to_vec();
 		many.extend(std::iter::repeat_n(b';', super::super::csi::MAX_PARAMS + 1));
 		many.extend_from_slice(b" k");
-		assert!(scan(&many).is_empty());
+		assert_eq!(scan(&many), [] as [(usize, ScpRequest); 0]);
 
 		// A runaway DIGIT run is clamped and the sequence lives, because the engine saturates rather
 		// than giving up. The clamped `Ps1` is simply not a path SCP defines.
 		let mut digits = b"\x1b[".to_vec();
 		digits.extend(std::iter::repeat_n(b'2', 500));
 		digits.extend_from_slice(b" k");
-		assert!(scan(&digits).is_empty());
+		assert_eq!(scan(&digits), [] as [(usize, ScpRequest); 0]);
 	}
 
 	/// The store: an exception list over a left-to-right default, and setting a line back to

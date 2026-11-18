@@ -357,7 +357,7 @@ mod tests {
 		// A Dynamic forward has no single target, so whatever is in the "to" box is not read.
 		let spec = ForwardSpec::parse(ForwardKind::Dynamic, "1080", "ignored:99").unwrap();
 		assert_eq!(spec.listen_port, 1080);
-		assert!(spec.target_host.is_empty());
+		assert_eq!(spec.target_host, "");
 		assert_eq!(spec.target_port, 0);
 		assert_eq!(spec.summary(), "127.0.0.1:1080 (SOCKS)");
 	}

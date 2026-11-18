@@ -410,6 +410,6 @@ mod tests {
 			iced::keyboard::Modifiers::empty(),
 		));
 
-		assert!(tab.home_filter.is_empty());
+		assert_eq!(tab.home_filter, "");
 	}
 }

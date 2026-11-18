@@ -5138,8 +5138,7 @@ impl Tab {
 		// the session mutably to reach its identities (§134).
 		let parked: Vec<(u64, Vec<u8>)> = self
 			.session_mut()
-			.map(|session| session.identities.as_mut_slice())
-			.unwrap_or_default()
+			.map_or_default(|session| session.identities.as_mut_slice())
 			.iter_mut()
 			.filter_map(|entry| {
 				let replies = entry.work.terminal.as_mut()?.release_held_update()?;
@@ -5215,7 +5214,7 @@ impl Tab {
 		let Some(unfinished) = self.unfinished.take() else {
 			return;
 		};
-		let endpoint = self.connection().map(str::to_owned).unwrap_or_default();
+		let endpoint = self.connection().map_or_default(str::to_owned);
 		self.transfers.adopt(unfinished, &endpoint);
 	}
 
@@ -5483,18 +5482,16 @@ impl Tab {
 				// acted on, and dropping them left a freshly elevated terminal blank (§45).
 				let replies = self
 					.session_mut()
-					.map(|session| session.identities.as_mut_slice())
-					.unwrap_or_default()
+					.map_or_default(|session| session.identities.as_mut_slice())
 					.iter_mut()
 					.find(|entry| entry.id == identity)
-					.map(|entry| {
+					.map_or_default(|entry| {
 						entry
 							.work
 							.terminal
 							.get_or_insert_with(new_emulator)
 							.process(&bytes)
-					})
-					.unwrap_or_default();
+					});
 				if !replies.is_empty() {
 					self.send_command(SshCommand::Reply {
 						identity,
@@ -5960,8 +5957,7 @@ impl Tab {
 		let user = self
 			.connection()
 			.and_then(|endpoint| endpoint.split_once('@'))
-			.map(|(user, _)| user.to_owned())
-			.unwrap_or_default();
+			.map_or_default(|(user, _)| user.to_owned());
 		self.send_command(SshCommand::ProbeIntegration { user });
 	}
 
@@ -6407,13 +6403,12 @@ impl Tab {
 		// contrast, the engine does track, so they come off the screen seam (§25, §36).
 		let modes = self
 			.terminal()
-			.map(|terminal| term::keymap::Modes {
+			.map_or_default(|terminal| term::keymap::Modes {
 				application_cursor: terminal.screen().application_cursor(),
 				application_keypad: terminal.screen().application_keypad(),
 				modify_other_keys: terminal.modify_other_keys(),
 				kitty: terminal.screen().kitty_flags(),
-			})
-			.unwrap_or_default();
+			});
 
 		if let Some(bytes) = term::keymap::encode(key, physical, text, modifiers, modes, event) {
 			if let Some(terminal) = self.terminal_mut() {
@@ -6874,9 +6869,7 @@ impl Tab {
 		let saved = targets.find(&key);
 		Arrival {
 			session: saved.map(crate::targets::Target::session),
-			forwards: saved
-				.map(|target| target.forwards.clone())
-				.unwrap_or_default(),
+			forwards: saved.map_or_default(|target| target.forwards.clone()),
 			key,
 		}
 	}

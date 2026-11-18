@@ -515,7 +515,7 @@ mod tests {
 		// leniency is deliberate and its whole cost is one byte of timing — see the constant.
 		assert_eq!(what(b"\x1bP$qm\x07"), vec!["-$q:m"]);
 		// An unterminated string is not reported at all, and neither is one that named no terminator.
-		assert!(what(b"\x1bP$qm").is_empty());
+		assert_eq!(what(b"\x1bP$qm"), [] as [String; 0]);
 		assert_eq!(
 			what(b"\x1bP$qm\x1bc"),
 			vec!["ESC c"],
@@ -613,8 +613,8 @@ mod tests {
 		// A parameter byte after an intermediate, and a private marker after the parameters started.
 		// Both send the engine's parser to `DcsIgnore` (`lib.rs:291`, `:309`), so neither string is
 		// reported here either.
-		assert!(strings(b"\x1bP$1qm\x1b\\").is_empty());
-		assert!(strings(b"\x1bP1?qm\x1b\\").is_empty());
+		assert_eq!(strings(b"\x1bP$1qm\x1b\\"), [] as [String; 0]);
+		assert_eq!(strings(b"\x1bP1?qm\x1b\\"), [] as [String; 0]);
 		// A marker BEFORE the parameters is legal, and reported as one rather than folded into them.
 		assert_eq!(strings(b"\x1bP?1qm\x1b\\"), vec!["?1q:m"]);
 		// More parameters than the engine's array holds: it sets `ignoring` and its handler never sees
@@ -622,12 +622,12 @@ mod tests {
 		let mut bytes = vec![ESC, b'P'];
 		bytes.extend(std::iter::repeat_n(b';', super::super::csi::MAX_PARAMS));
 		bytes.extend_from_slice(b"qm\x1b\\");
-		assert!(strings(&bytes).is_empty());
+		assert_eq!(strings(&bytes), [] as [String; 0]);
 		// One more intermediate than this framer will hold.
 		let mut bytes = vec![ESC, b'P'];
 		bytes.extend(std::iter::repeat_n(b'$', MAX_INTERMEDIATES + 1));
 		bytes.extend_from_slice(b"qm\x1b\\");
-		assert!(strings(&bytes).is_empty());
+		assert_eq!(strings(&bytes), [] as [String; 0]);
 	}
 
 	#[test]
@@ -691,8 +691,8 @@ mod tests {
 		// A CSI, an OSC and an APC string are not this framer's, and none of them is reported. Nor is
 		// anything inside them mistaken for a sequence: an ESC is the only thing that can interrupt one,
 		// and an ESC ends it for the engine too (§111).
-		assert!(what(b"\x1b[2J").is_empty());
-		assert!(what(b"\x1b]7;file:///tmp\x07").is_empty());
+		assert_eq!(what(b"\x1b[2J"), [] as [String; 0]);
+		assert_eq!(what(b"\x1b]7;file:///tmp\x07"), [] as [String; 0]);
 		assert_eq!(
 			what(b"\x1b_Gf=100\x1b\\"),
 			vec!["ESC \\"],
@@ -709,7 +709,7 @@ mod tests {
 		// `P`, inside the introducer, mid-payload, and between the ESC and the `\`.
 		let mut framer = Framer::<256>::default();
 		for chunk in [&b"\x1b"[..], b"P", b"$", b"q", b"m", b"\x1b"] {
-			assert!(frame(&mut framer, chunk).is_empty());
+			assert_eq!(frame(&mut framer, chunk), [] as [(usize, String); 0]);
 		}
 		assert_eq!(
 			frame(&mut framer, b"\\"),
@@ -723,7 +723,7 @@ mod tests {
 		// A sequence that began in a previous chunk has no start offset in this one, and 0 is not an
 		// approximation: everything before it really has been fed already.
 		let mut framer = Framer::<256>::default();
-		assert!(frame(&mut framer, b"text\x1b").is_empty());
+		assert_eq!(frame(&mut framer, b"text\x1b"), [] as [(usize, String); 0]);
 		assert_eq!(frame(&mut framer, b"c"), vec![(0, "ESC c".to_owned())]);
 	}
 }

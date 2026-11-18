@@ -375,7 +375,7 @@ mod tests {
 	#[test]
 	fn an_omitted_parameter_drops_the_whole_sequence_and_a_written_zero_does_not() {
 		assert!(scan(b"\x1b[1;;4#{").is_empty(), "an empty field is not a 0");
-		assert!(scan(b"\x1b[;#{").is_empty());
+		assert_eq!(scan(b"\x1b[;#{"), [] as [(usize, SgrStackRequest); 0]);
 		// `0` is a code xterm never defined, so it is IGNORED and the rest of the list applies. The two
 		// came out identical until §111 gave `Params` its all-zero field back, and this scanner is the
 		// only one in the directory that can tell the difference.
@@ -394,7 +394,7 @@ mod tests {
 	/// the near-miss rule §56 wrote down, applied to the separator (`Csi::sub_parameters`).
 	#[test]
 	fn a_sub_parameter_is_not_this_sequence() {
-		assert!(scan(b"\x1b[1:3#{").is_empty());
+		assert_eq!(scan(b"\x1b[1:3#{"), [] as [(usize, SgrStackRequest); 0]);
 		assert!(scan(b"\x1b[1;2:3#{").is_empty(), "anywhere in the run");
 		assert!(
 			scan(b"\x1b[4:1#}").is_empty(),
@@ -421,8 +421,8 @@ mod tests {
 	/// XTPOPSGR takes no parameters, so one carrying any is a sequence cmote does not understand.
 	#[test]
 	fn a_pop_with_parameters_is_not_ours() {
-		assert!(scan(b"\x1b[1#}").is_empty());
-		assert!(scan(b"\x1b[0#q").is_empty());
+		assert_eq!(scan(b"\x1b[1#}"), [] as [(usize, SgrStackRequest); 0]);
+		assert_eq!(scan(b"\x1b[0#q"), [] as [(usize, SgrStackRequest); 0]);
 	}
 
 	/// The `#` intermediate is the whole of what separates these from their neighbours on the same
@@ -440,8 +440,8 @@ mod tests {
 	/// A private marker makes it a different sequence, whatever the rest looks like.
 	#[test]
 	fn a_private_marker_rules_it_out() {
-		assert!(scan(b"\x1b[?#{").is_empty());
-		assert!(scan(b"\x1b[>1#{").is_empty());
+		assert_eq!(scan(b"\x1b[?#{"), [] as [(usize, SgrStackRequest); 0]);
+		assert_eq!(scan(b"\x1b[>1#{"), [] as [(usize, SgrStackRequest); 0]);
 	}
 
 	/// Output arrives in chunks of whatever size the pty hands over, so the state machine has to
@@ -449,9 +449,9 @@ mod tests {
 	#[test]
 	fn a_sequence_split_across_chunks_is_still_found() {
 		let mut stack = SgrStack::default();
-		assert!(stack.feed(b"\x1b").is_empty());
-		assert!(stack.feed(b"[1").is_empty());
-		assert!(stack.feed(b";4").is_empty());
+		assert_eq!(stack.feed(b"\x1b"), [] as [(usize, SgrStackRequest); 0]);
+		assert_eq!(stack.feed(b"[1"), [] as [(usize, SgrStackRequest); 0]);
+		assert_eq!(stack.feed(b";4"), [] as [(usize, SgrStackRequest); 0]);
 		// The offset is into THIS chunk, which is where the interruption advance uses it.
 		assert_eq!(
 			stack.feed(b"#{"),
@@ -464,9 +464,9 @@ mod tests {
 	fn a_control_byte_does_not_abandon_the_sequence() {
 		// The reverse of what this asserted before §106: the engine reads a mid-sequence control byte
 		// through and keeps the sequence, so cmote does too, or the two disagree about the same bytes.
-		assert!(!scan(b"\x1b[1\x07#{").is_empty());
+		assert_ne!(scan(b"\x1b[1\x07#{"), [] as [(usize, SgrStackRequest); 0]);
 		// CAN and SUB are the only two that really cancel one.
-		assert!(scan(b"\x1b[1\x18#{").is_empty());
+		assert_eq!(scan(b"\x1b[1\x18#{"), [] as [(usize, SgrStackRequest); 0]);
 	}
 
 	/// A hostile stream must not be able to make the scanner buffer without bound — and the two bounds

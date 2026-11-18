@@ -299,7 +299,7 @@ mod tests {
 	fn only_the_two_reports_dec_defines_are_answered() {
 		assert!(scan(b"\x1b[0$w").is_empty(), "DEC's own error value");
 		assert!(scan(b"\x1b[$w").is_empty(), "omitted is 0");
-		assert!(scan(b"\x1b[3$w").is_empty());
+		assert_eq!(scan(b"\x1b[3$w"), [] as [(usize, PresentationRequest); 0]);
 		assert!(scan(b"\x1b[12$w").is_empty(), "not a prefix match");
 	}
 
@@ -317,8 +317,8 @@ mod tests {
 	/// second one, which is the distinction `param_count` exists to keep (§111).
 	#[test]
 	fn a_second_parameter_rules_it_out() {
-		assert!(scan(b"\x1b[1;2$w").is_empty());
-		assert!(scan(b"\x1b[1;$w").is_empty());
+		assert_eq!(scan(b"\x1b[1;2$w"), [] as [(usize, PresentationRequest); 0]);
+		assert_eq!(scan(b"\x1b[1;$w"), [] as [(usize, PresentationRequest); 0]);
 		assert!(
 			scan(b"\x1b[1:2$w").is_empty(),
 			"and a sub-parameter with it"
@@ -329,15 +329,18 @@ mod tests {
 	fn a_private_marker_rules_it_out() {
 		for marker in *b"?<=>" {
 			let request = [b"\x1b[".as_slice(), &[marker], b"1$w"].concat();
-			assert!(scan(&request).is_empty());
+			assert_eq!(scan(&request), [] as [(usize, PresentationRequest); 0]);
 		}
 	}
 
 	#[test]
 	fn a_sequence_split_across_chunks_is_still_found() {
 		let mut scanner = Presentation::default();
-		assert!(scanner.feed(b"\x1b[1").is_empty());
-		assert!(scanner.feed(b"$").is_empty());
+		assert_eq!(
+			scanner.feed(b"\x1b[1"),
+			[] as [(usize, PresentationRequest); 0]
+		);
+		assert_eq!(scanner.feed(b"$"), [] as [(usize, PresentationRequest); 0]);
 		assert_eq!(scanner.feed(b"w"), vec![(1, PresentationRequest::Cursor)]);
 	}
 

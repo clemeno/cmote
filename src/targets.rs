@@ -888,7 +888,7 @@ mod tests {
 		let mut targets = Targets::default();
 		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None, None);
 		assert!(targets.remove("u@h:1"));
-		assert!(targets.items().is_empty());
+		assert_eq!(targets.items(), []);
 		assert!(!targets.remove("u@h:1")); // already gone
 	}
 
@@ -1160,7 +1160,10 @@ mod tests {
 		let path = dir.path().join("targets.json");
 		let mut targets = Targets::default();
 		targets.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
-		assert!(targets.find("u@h:22").unwrap().forwards.is_empty());
+		assert_eq!(
+			targets.find("u@h:22").unwrap().forwards,
+			[] as [ForwardSpec; 0]
+		);
 
 		// Act / Assert: setting them reports a change and sticks; setting the same set again
 		// reports none; an unknown endpoint is a no-op.
@@ -1205,7 +1208,10 @@ mod tests {
 			r#"[{"name":"prod","host":"h","port":22,"user":"u","auth_kind":"password"}]"#,
 		)
 		.unwrap();
-		assert!(Targets::load_from(&path).items()[0].forwards.is_empty());
+		assert_eq!(
+			Targets::load_from(&path).items()[0].forwards,
+			[] as [ForwardSpec; 0]
+		);
 	}
 
 	#[test]
@@ -1225,7 +1231,7 @@ mod tests {
 	fn load_missing_file_is_empty() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("does-not-exist.json");
-		assert!(Targets::load_from(&path).items().is_empty());
+		assert_eq!(Targets::load_from(&path).items(), []);
 	}
 
 	#[test]
@@ -1233,7 +1239,7 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("targets.json");
 		std::fs::write(&path, "{ this is not json").unwrap();
-		assert!(Targets::load_from(&path).items().is_empty());
+		assert_eq!(Targets::load_from(&path).items(), []);
 	}
 
 	// ---- §110: the format version, the migration, and the refusal ----
@@ -1346,7 +1352,7 @@ mod tests {
 		let path = dir.path().join("targets.json");
 		std::fs::write(&path, "this is not JSON at all").unwrap();
 		let targets = Targets::load_from(&path);
-		assert!(targets.items().is_empty());
+		assert_eq!(targets.items(), []);
 		assert!(
 			targets.refusal().is_none(),
 			"garbage is not a version refusal — it must stay overwritable"

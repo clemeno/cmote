@@ -767,10 +767,10 @@ mod tests {
 	/// and a second writer of one instruction is exactly what this split exists to avoid.
 	#[test]
 	fn ascii_and_line_drawing_are_left_to_the_gate() {
-		assert!(scan(b"\x1b(B").is_empty());
-		assert!(scan(b"\x1b(0").is_empty());
-		assert!(scan(b"\x1b+B").is_empty());
-		assert!(scan(b"\x1b+0").is_empty());
+		assert_eq!(scan(b"\x1b(B"), [] as [(usize, CharsetRequest); 0]);
+		assert_eq!(scan(b"\x1b(0"), [] as [(usize, CharsetRequest); 0]);
+		assert_eq!(scan(b"\x1b+B"), [] as [(usize, CharsetRequest); 0]);
+		assert_eq!(scan(b"\x1b+0"), [] as [(usize, CharsetRequest); 0]);
 	}
 
 	/// An unrecognised final leaves the slot alone. DEC Technical and DEC Supplemental are the two
@@ -864,9 +864,9 @@ mod tests {
 	#[test]
 	fn a_sequence_split_across_chunks_is_still_found() {
 		let mut scanner = Designations::default();
-		assert!(scanner.feed(b"\x1b").is_empty());
-		assert!(scanner.feed(b"(").is_empty());
-		assert!(scanner.feed(b"%").is_empty());
+		assert_eq!(scanner.feed(b"\x1b"), [] as [(usize, CharsetRequest); 0]);
+		assert_eq!(scanner.feed(b"("), [] as [(usize, CharsetRequest); 0]);
+		assert_eq!(scanner.feed(b"%"), [] as [(usize, CharsetRequest); 0]);
 		// The offset is into THIS chunk, which is where the interruption advance uses it.
 		assert_eq!(scanner.feed(b"6")[0].0, 1);
 	}

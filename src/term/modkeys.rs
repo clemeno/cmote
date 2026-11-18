@@ -301,7 +301,7 @@ mod tests {
 			);
 		}
 		// An omitted parameter defaults to 0, `modifyKeyboard`, likewise not ours.
-		assert!(ask(b"\x1b[?m").is_empty());
+		assert_eq!(ask(b"\x1b[?m"), [] as [u8; 0]);
 		// And the one that IS ours still answers, so the allow-list is not simply silent.
 		assert_eq!(ask(b"\x1b[?4m"), b"\x1b[>4;0m".to_vec());
 	}
@@ -328,14 +328,17 @@ mod tests {
 	fn a_second_parameter_makes_it_someone_elses_sequence() {
 		// XTQMODKEYS takes one parameter. Two means this is not the sequence it looks like, and
 		// §54's rule is that malformed input is a no-op rather than a guess.
-		assert!(ask(b"\x1b[?4;1m").is_empty());
+		assert_eq!(ask(b"\x1b[?4;1m"), [] as [u8; 0]);
 	}
 
 	#[test]
 	fn a_private_mode_is_not_mistaken_for_a_question() {
 		// `?` opens every DECSET and DECRST there is — the common case by a wide margin. They are
 		// collected as far as their own final byte and then dropped, and must never answer.
-		assert!(ask(b"\x1b[?1049h\x1b[?2004h\x1b[?25l\x1b[?1000;1006h").is_empty());
+		assert_eq!(
+			ask(b"\x1b[?1049h\x1b[?2004h\x1b[?25l\x1b[?1000;1006h"),
+			[] as [u8; 0]
+		);
 		// Nor may the query marker leak into a set: `? 4 m` must not change the level.
 		let mut modkeys = ModKeys::default();
 		modkeys.feed(b"\x1b[>4;2m\x1b[?4m");
@@ -345,14 +348,17 @@ mod tests {
 	#[test]
 	fn a_question_split_across_chunks_is_still_answered() {
 		let mut modkeys = ModKeys::default();
-		assert!(modkeys.feed(b"\x1b[>4;2mtext\x1b[?").is_empty());
+		assert_eq!(modkeys.feed(b"\x1b[>4;2mtext\x1b[?"), [] as [u8; 0]);
 		assert_eq!(modkeys.feed(b"4mmore"), b"\x1b[>4;2m".to_vec());
 	}
 
 	#[test]
 	fn ordinary_output_owes_nothing() {
 		// The common chunk must allocate nothing and say nothing.
-		assert!(ask(b"\x1b[31mred\x1b[0m\x1b[2J\x1b[1;1Hhello").is_empty());
+		assert_eq!(
+			ask(b"\x1b[31mred\x1b[0m\x1b[2J\x1b[1;1Hhello"),
+			[] as [u8; 0]
+		);
 	}
 
 	/// A byte the engine reads STRAIGHT THROUGH must not change what this module makes of a
@@ -367,7 +373,7 @@ mod tests {
 		assert_eq!(ask(b"\x1b[?\x7f4m"), b"\x1b[>4;0m".to_vec());
 		// CAN and SUB are the only two bytes that really cancel a sequence in flight.
 		assert_eq!(track(b"\x1b[>4;\x182m"), ModifyOtherKeys::Off);
-		assert!(ask(b"\x1b[?4\x1am").is_empty());
+		assert_eq!(ask(b"\x1b[?4\x1am"), [] as [u8; 0]);
 	}
 
 	/// An intermediate byte makes it some other sequence on the same marker — the near-miss rule
@@ -376,7 +382,7 @@ mod tests {
 	#[test]
 	fn an_intermediate_byte_rules_both_out() {
 		assert_eq!(track(b"\x1b[>4;2 m"), ModifyOtherKeys::Off);
-		assert!(ask(b"\x1b[?4 m").is_empty());
+		assert_eq!(ask(b"\x1b[?4 m"), [] as [u8; 0]);
 	}
 
 	/// A hostile stream must not be able to make the scanner buffer without bound — and the two
@@ -420,7 +426,7 @@ mod tests {
 	#[test]
 	fn a_sub_parameter_is_not_this_sequence() {
 		assert_eq!(track(b"\x1b[>4:2m"), ModifyOtherKeys::Off);
-		assert!(ask(b"\x1b[?4:1m").is_empty());
+		assert_eq!(ask(b"\x1b[?4:1m"), [] as [u8; 0]);
 		// The `;` spelling of the same two numbers IS the sequence, so this is about the separator.
 		assert_eq!(track(b"\x1b[>4;2m"), ModifyOtherKeys::Level2);
 	}
@@ -428,7 +434,7 @@ mod tests {
 	/// An empty second parameter is still a second parameter, so the question is not this one.
 	#[test]
 	fn a_trailing_separator_is_a_second_parameter() {
-		assert!(ask(b"\x1b[?4;m").is_empty());
+		assert_eq!(ask(b"\x1b[?4;m"), [] as [u8; 0]);
 		assert_eq!(ask(b"\x1b[?4m"), b"\x1b[>4;0m".to_vec(), "one is ours");
 	}
 

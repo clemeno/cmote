@@ -267,28 +267,31 @@ mod tests {
 		assert!(scan(b"\x1b[r").is_empty(), "DECSTBM reset to the full page");
 		// And a marker that is not `?` is a third thing again.
 		assert!(scan(b"\x1b[>25s").is_empty(), "XTSHIFTESCAPE's marker");
-		assert!(scan(b"\x1b[<25r").is_empty());
+		assert_eq!(scan(b"\x1b[<25r"), [] as [(usize, SaveModesRequest); 0]);
 	}
 
 	/// An intermediate makes it somebody else's sequence — `$ r` is DECCARA, `$ p` DECRQM — so the
 	/// match tests all three of final byte, marker and intermediates (§56).
 	#[test]
 	fn an_intermediate_rules_it_out() {
-		assert!(scan(b"\x1b[?25$r").is_empty());
-		assert!(scan(b"\x1b[?25 s").is_empty());
+		assert_eq!(scan(b"\x1b[?25$r"), [] as [(usize, SaveModesRequest); 0]);
+		assert_eq!(scan(b"\x1b[?25 s"), [] as [(usize, SaveModesRequest); 0]);
 	}
 
 	/// `Pm` is spelled with `;` by DEC and by xterm alike, so a `:` is a spelling neither defines.
 	#[test]
 	fn a_sub_parameter_rules_it_out() {
-		assert!(scan(b"\x1b[?1000:1002s").is_empty());
+		assert_eq!(
+			scan(b"\x1b[?1000:1002s"),
+			[] as [(usize, SaveModesRequest); 0]
+		);
 	}
 
 	/// A sequence naming no modes asks for nothing, so it is not put through the interruption loop.
 	#[test]
 	fn a_sequence_naming_no_modes_is_not_claimed() {
-		assert!(scan(b"\x1b[?s").is_empty());
-		assert!(scan(b"\x1b[?r").is_empty());
+		assert_eq!(scan(b"\x1b[?s"), [] as [(usize, SaveModesRequest); 0]);
+		assert_eq!(scan(b"\x1b[?r"), [] as [(usize, SaveModesRequest); 0]);
 	}
 
 	/// An empty field in the middle of the list is a gap, not a mode. Reading it as 0 would put a
@@ -309,9 +312,9 @@ mod tests {
 	#[test]
 	fn a_sequence_split_across_chunks_is_still_found() {
 		let mut scanner = SaveModes::default();
-		assert!(scanner.feed(b"\x1b").is_empty());
-		assert!(scanner.feed(b"[?2").is_empty());
-		assert!(scanner.feed(b"5").is_empty());
+		assert_eq!(scanner.feed(b"\x1b"), [] as [(usize, SaveModesRequest); 0]);
+		assert_eq!(scanner.feed(b"[?2"), [] as [(usize, SaveModesRequest); 0]);
+		assert_eq!(scanner.feed(b"5"), [] as [(usize, SaveModesRequest); 0]);
 		assert_eq!(scanner.feed(b"s").len(), 1);
 	}
 

@@ -230,7 +230,7 @@ mod tests {
 		assert_eq!(scan(b"\x1b[1'|").len(), 1);
 		assert!(scan(b"\x1b[2'|").is_empty(), "DEC defined no 2");
 		assert!(scan(b"\x1b[10'|").is_empty(), "not a prefix match");
-		assert!(scan(b"\x1b[99999'|").is_empty());
+		assert_eq!(scan(b"\x1b[99999'|"), [] as [usize; 0]);
 	}
 
 	/// DECRQLP takes exactly one `Ps`, so a second parameter means a sequence this scanner does not
@@ -239,22 +239,22 @@ mod tests {
 	/// to keep (§111).
 	#[test]
 	fn a_second_parameter_rules_it_out() {
-		assert!(scan(b"\x1b[0;1'|").is_empty());
-		assert!(scan(b"\x1b[0;'|").is_empty());
+		assert_eq!(scan(b"\x1b[0;1'|"), [] as [usize; 0]);
+		assert_eq!(scan(b"\x1b[0;'|"), [] as [usize; 0]);
 		// A sub-parameter is excluded by the same count test, without a rule of its own.
-		assert!(scan(b"\x1b[0:1'|").is_empty());
+		assert_eq!(scan(b"\x1b[0:1'|"), [] as [usize; 0]);
 	}
 
 	/// The intermediate is what makes this a locator sequence at all. Without it the final byte is
 	/// somebody else's, and cmote must not answer it.
 	#[test]
 	fn the_apostrophe_intermediate_is_required() {
-		assert!(scan(b"\x1b[0|").is_empty());
+		assert_eq!(scan(b"\x1b[0|"), [] as [usize; 0]);
 		assert!(
 			scan(b"\x1b[0 '|").is_empty(),
 			"a second intermediate is not one"
 		);
-		assert!(scan(b"\x1b[0''|").is_empty());
+		assert_eq!(scan(b"\x1b[0''|"), [] as [usize; 0]);
 	}
 
 	/// DEC defined no private marker for this final byte, so a sequence carrying one is a different
@@ -277,10 +277,10 @@ mod tests {
 	#[test]
 	fn a_sequence_split_across_chunks_is_still_found() {
 		let mut locator = Locator::default();
-		assert!(locator.feed(b"\x1b").is_empty());
-		assert!(locator.feed(b"[").is_empty());
-		assert!(locator.feed(b"0").is_empty());
-		assert!(locator.feed(b"'").is_empty());
+		assert_eq!(locator.feed(b"\x1b"), [] as [usize; 0]);
+		assert_eq!(locator.feed(b"["), [] as [usize; 0]);
+		assert_eq!(locator.feed(b"0"), [] as [usize; 0]);
+		assert_eq!(locator.feed(b"'"), [] as [usize; 0]);
 		// The offset is into THIS chunk, which is where the interruption advance uses it.
 		assert_eq!(locator.feed(b"|"), vec![1]);
 	}

@@ -1235,7 +1235,7 @@ mod tests {
 			bridge::LOGIN_IDENTITY,
 			"to the shell that asked, not the one on screen"
 		);
-		assert!(!reply.1.is_empty());
+		assert_ne!(reply.1, [] as [u8; 0]);
 		assert!(
 			!sent
 				.iter()

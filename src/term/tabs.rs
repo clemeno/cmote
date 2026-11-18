@@ -251,8 +251,8 @@ mod tests {
 	#[test]
 	fn only_the_parameter_five_is_a_tab_reset() {
 		assert!(scan(b"\x1b[?W").is_empty(), "an omitted parameter means 0");
-		assert!(scan(b"\x1b[?0W").is_empty());
-		assert!(scan(b"\x1b[?2W").is_empty());
+		assert_eq!(scan(b"\x1b[?0W"), [] as [usize; 0]);
+		assert_eq!(scan(b"\x1b[?2W"), [] as [usize; 0]);
 		assert!(scan(b"\x1b[?50W").is_empty(), "not a prefix match");
 	}
 
@@ -261,7 +261,7 @@ mod tests {
 	/// keeps one reading of the grammar in the terminal.
 	#[test]
 	fn the_private_marker_is_required() {
-		assert!(scan(b"\x1b[5W").is_empty());
+		assert_eq!(scan(b"\x1b[5W"), [] as [usize; 0]);
 		assert!(
 			scan(b"\x1b[>5W").is_empty(),
 			"a different marker is a different sequence"
@@ -272,7 +272,7 @@ mod tests {
 	/// byte, marker and intermediates — the near-miss rule §56 wrote down.
 	#[test]
 	fn an_intermediate_byte_rules_it_out() {
-		assert!(scan(b"\x1b[?5 W").is_empty());
+		assert_eq!(scan(b"\x1b[?5 W"), [] as [usize; 0]);
 	}
 
 	/// Output arrives in chunks of whatever size the pty hands over, so the state machine has to
@@ -280,9 +280,9 @@ mod tests {
 	#[test]
 	fn a_sequence_split_across_chunks_is_still_found() {
 		let mut tabs = Tabs::default();
-		assert!(tabs.feed(b"\x1b").is_empty());
-		assert!(tabs.feed(b"[?").is_empty());
-		assert!(tabs.feed(b"5").is_empty());
+		assert_eq!(tabs.feed(b"\x1b"), [] as [usize; 0]);
+		assert_eq!(tabs.feed(b"[?"), [] as [usize; 0]);
+		assert_eq!(tabs.feed(b"5"), [] as [usize; 0]);
 		// The offset is into THIS chunk, which is where the interruption advance uses it.
 		assert_eq!(tabs.feed(b"W"), vec![1]);
 	}
@@ -293,9 +293,9 @@ mod tests {
 	fn a_control_byte_does_not_abandon_the_sequence() {
 		// The reverse of what this asserted before §106: the engine reads a mid-sequence control byte
 		// through and keeps the sequence, so cmote does too, or the two disagree about the same bytes.
-		assert!(!scan(b"\x1b[?5\x07W").is_empty());
+		assert_ne!(scan(b"\x1b[?5\x07W"), [] as [usize; 0]);
 		// CAN and SUB are the only two that really cancel one.
-		assert!(scan(b"\x1b[?5\x18W").is_empty());
+		assert_eq!(scan(b"\x1b[?5\x18W"), [] as [usize; 0]);
 	}
 
 	/// A hostile stream must not be able to make the scanner buffer without bound — and the two bounds
@@ -307,7 +307,7 @@ mod tests {
 		let mut many = b"\x1b[?".to_vec();
 		many.extend(std::iter::repeat_n(b';', super::super::csi::MAX_PARAMS + 1));
 		many.push(b'W');
-		assert!(scan(&many).is_empty());
+		assert_eq!(scan(&many), [] as [usize; 0]);
 
 		// A runaway DIGIT run is clamped instead, and the sequence lives — because the engine
 		// saturates the number rather than giving up on the sequence. It is simply not DECST8C, since
@@ -315,7 +315,7 @@ mod tests {
 		let mut digits = b"\x1b[?".to_vec();
 		digits.extend(std::iter::repeat_n(b'5', 500));
 		digits.push(b'W');
-		assert!(scan(&digits).is_empty());
+		assert_eq!(scan(&digits), [] as [usize; 0]);
 	}
 
 	/// Leading zeros do not change what a parameter means, so `CSI ? 000005 W` is DECST8C — which is

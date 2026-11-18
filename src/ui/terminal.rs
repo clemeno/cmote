@@ -306,15 +306,13 @@ pub fn view<'a>(
 	// of them — resolved here, where both the bar's state and the viewport's numbers are already to
 	// hand, and empty whenever the bar is shut.
 	let screen = terminal.screen();
-	let matches = search
-		.map(|search| {
-			search.visible(
-				screen.history_size(),
-				screen.display_offset(),
-				screen.size().0,
-			)
-		})
-		.unwrap_or_default();
+	let matches = search.map_or_default(|search| {
+		search.visible(
+			screen.history_size(),
+			screen.display_offset(),
+			screen.size().0,
+		)
+	});
 
 	// The scrollbar is a grabbable surface (§119), so like a tab chip and a dialog header it has to
 	// say it is still on screen with every frame it is drawn into, or the hand it is holding is let go

@@ -435,8 +435,7 @@ impl Tab {
 			// visit sees what the next session will do and can change it before connecting.
 			elevate_account: elevate
 				.as_ref()
-				.map(|saved| saved.account.clone())
-				.unwrap_or_default(),
+				.map_or_default(|saved| saved.account.clone()),
 			elevate_kind: elevate
 				.as_ref()
 				.map_or(crate::elevate::ElevateKind::default(), |saved| saved.kind),
@@ -946,7 +945,7 @@ mod tests {
 
 		assert_eq!(arrival.key, "cme@new-host:22");
 		// It IS saved now — a real connect persists the target (§14) — it just has no history.
-		assert!(arrival.forwards.is_empty());
+		assert_eq!(arrival.forwards, [] as [crate::forward::ForwardSpec; 0]);
 		assert!(
 			arrival
 				.session

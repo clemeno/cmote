@@ -205,12 +205,12 @@ mod tests {
 	fn a_bare_save_cursor_is_left_alone() {
 		// The universal spelling, and the one meaning cmote keeps. Every save-cursor in the wild is
 		// this one, so cancelling it would break far more than the collision does.
-		assert!(scan(b"\x1b[s").is_empty());
+		assert_eq!(scan(b"\x1b[s"), [] as [usize; 0]);
 	}
 
 	#[test]
 	fn a_restore_cursor_is_left_alone() {
-		assert!(scan(b"\x1b[u").is_empty());
+		assert_eq!(scan(b"\x1b[u"), [] as [usize; 0]);
 	}
 
 	#[test]
@@ -218,37 +218,40 @@ mod tests {
 		// `CSI ? Pm s` is XTSAVE and `CSI ? Pm r` XTRESTORE. Both carry parameters and end in a byte
 		// this scanner watches, and neither is DECSLRM — the marker is what says so. The engine has
 		// no arm for either, so they are already dropped without harm.
-		assert!(scan(b"\x1b[?1049s\x1b[?1049r").is_empty());
+		assert_eq!(scan(b"\x1b[?1049s\x1b[?1049r"), [] as [usize; 0]);
 	}
 
 	#[test]
 	fn an_intermediate_byte_rules_out_a_margin_request() {
 		// DECSLRM has no intermediate, so `CSI 1 SP s` is some other sequence and not ours to touch.
-		assert!(scan(b"\x1b[1 s").is_empty());
+		assert_eq!(scan(b"\x1b[1 s"), [] as [usize; 0]);
 	}
 
 	#[test]
 	fn the_scroll_region_is_left_alone() {
 		// DECSTBM (`CSI Pt;Pb r`) is the vertical margins, which the engine DOES implement. Sharing
 		// the parametrised shape with DECSLRM is exactly why the final byte is checked.
-		assert!(scan(b"\x1b[1;24r").is_empty());
+		assert_eq!(scan(b"\x1b[1;24r"), [] as [usize; 0]);
 	}
 
 	#[test]
 	fn ordinary_output_asks_for_nothing() {
 		// The common case has to cost nothing: no cancel means `process` never splits its advance.
-		assert!(scan(b"\x1b[31mred\x1b[0m\x1b[2J\x1b[1;1Hhello").is_empty());
+		assert_eq!(
+			scan(b"\x1b[31mred\x1b[0m\x1b[2J\x1b[1;1Hhello"),
+			[] as [usize; 0]
+		);
 	}
 
 	#[test]
 	fn a_letter_s_in_plain_text_is_not_a_sequence() {
-		assert!(scan(b"save this string").is_empty());
+		assert_eq!(scan(b"save this string"), [] as [usize; 0]);
 	}
 
 	#[test]
 	fn scroll_up_is_not_confused_with_it() {
 		// SU is the capital `S`; the final byte is case-sensitive.
-		assert!(scan(b"\x1b[5S").is_empty());
+		assert_eq!(scan(b"\x1b[5S"), [] as [usize; 0]);
 	}
 
 	#[test]
@@ -256,8 +259,8 @@ mod tests {
 		// Output arrives in arbitrary chunks, including between the ESC and the `[`, and the engine's
 		// own parser carries the head across the boundary the same way.
 		let mut cancel = Cancel::default();
-		assert!(cancel.feed(b"text\x1b").is_empty());
-		assert!(cancel.feed(b"[5;7").is_empty());
+		assert_eq!(cancel.feed(b"text\x1b"), [] as [CancelRequest; 0]);
+		assert_eq!(cancel.feed(b"[5;7"), [] as [CancelRequest; 0]);
 		// The offset counts from the start of the chunk that completed the sequence — and the numbers
 		// survive the boundary, since `70` was written across it.
 		let found = cancel.feed(b"0shello");
@@ -284,13 +287,13 @@ mod tests {
 	fn a_third_parameter_rules_the_sequence_out() {
 		// DECSLRM has two. Three means some other sequence ending in `s`, and cancelling it would
 		// take a save-cursor a program is entitled to.
-		assert!(scan(b"\x1b[1;2;3s").is_empty());
+		assert_eq!(scan(b"\x1b[1;2;3s"), [] as [usize; 0]);
 	}
 
 	#[test]
 	fn a_sub_parameter_rules_the_sequence_out() {
 		// Colons introduce sub-parameters, which DECSLRM does not have.
-		assert!(scan(b"\x1b[1:2s").is_empty());
+		assert_eq!(scan(b"\x1b[1:2s"), [] as [usize; 0]);
 	}
 
 	#[test]
@@ -364,7 +367,7 @@ mod tests {
 		let mut params = vec![b'\x1b', b'['];
 		params.extend(std::iter::repeat_n(b';', 500));
 		params.push(b's');
-		assert!(scan(&params).is_empty());
+		assert_eq!(scan(&params), [] as [usize; 0]);
 	}
 
 	#[test]
@@ -380,8 +383,8 @@ mod tests {
 	fn only_can_and_sub_really_cancel_a_sequence() {
 		// The two bytes the ANSI state machine defines as cancels, which is why cmote feeds one of them in
 		// place of a final byte it refuses. The engine leaves the sequence for the same pair and no others.
-		assert!(scan(b"\x1b[5;70\x18s").is_empty());
-		assert!(scan(b"\x1b[5;70\x1as").is_empty());
+		assert_eq!(scan(b"\x1b[5;70\x18s"), [] as [usize; 0]);
+		assert_eq!(scan(b"\x1b[5;70\x1as"), [] as [usize; 0]);
 		// And DEL is not one of them: the engine ignores it and keeps reading.
 		assert_eq!(numbers(b"\x1b[5;70\x7fs"), (Some(5), Some(70)));
 	}

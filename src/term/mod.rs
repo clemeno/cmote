@@ -1251,7 +1251,8 @@ impl Terminal {
 						underline: flags.intersects(
 							Flags::UNDERLINE
 								| Flags::DOUBLE_UNDERLINE
-								| Flags::UNDERCURL | Flags::DOTTED_UNDERLINE
+								| Flags::UNDERCURL
+								| Flags::DOTTED_UNDERLINE
 								| Flags::DASHED_UNDERLINE,
 						),
 						reverse: flags.contains(Flags::INVERSE),
@@ -3446,8 +3447,8 @@ mod tests {
 		// sequences were consumed whole rather than half-parsed with their tail spilling onto the
 		// screen.
 		let mut terminal = Terminal::new(4, 20);
-		assert!(terminal.process(b"\x1b]52;c;aGVsbG8=\x07").is_empty());
-		assert!(terminal.process(b"\x1b]52;c;?\x07").is_empty());
+		assert_eq!(terminal.process(b"\x1b]52;c;aGVsbG8=\x07"), [] as [u8; 0]);
+		assert_eq!(terminal.process(b"\x1b]52;c;?\x07"), [] as [u8; 0]);
 		terminal.process(b"after");
 		assert_eq!(read(&terminal, 0, 0, 5), "after");
 	}
@@ -3501,10 +3502,9 @@ mod tests {
 				.is_empty(),
 			"OSC 52 is refused inside the wrapper too"
 		);
-		assert!(
-			refused
-				.process(b"\x1bPtmux;\x1b\x1b]9;Build finished\x07\x1b\\")
-				.is_empty()
+		assert_eq!(
+			refused.process(b"\x1bPtmux;\x1b\x1b]9;Build finished\x07\x1b\\"),
+			[] as [u8; 0]
 		);
 	}
 
@@ -3526,10 +3526,9 @@ mod tests {
 		let mut terminal = Terminal::new(4, 40);
 		// `o=s` is upload-and-render, the one command that needs no prior upload — the closest thing
 		// the protocol has to a sixel, and still nothing here.
-		assert!(
-			terminal
-				.process(b"\x1bP!go=s,f=2,c=2,r=1;\x00\x00\x00\x1b\\")
-				.is_empty()
+		assert_eq!(
+			terminal.process(b"\x1bP!go=s,f=2,c=2,r=1;\x00\x00\x00\x1b\\"),
+			[] as [u8; 0]
 		);
 		terminal.process(b"after");
 		assert_eq!(
@@ -3538,7 +3537,7 @@ mod tests {
 			"the wrapper was consumed whole, payload included"
 		);
 		// The query command (`o=q`) asks for the resource limits. Answering it would advertise.
-		assert!(terminal.process(b"\x1bP!go=q\x1b\\").is_empty());
+		assert_eq!(terminal.process(b"\x1bP!go=q\x1b\\"), [] as [u8; 0]);
 		// And the advertisement itself: DA1 names 6 and 4, never 90.
 		assert_eq!(terminal.process(b"\x1b[c"), b"\x1b[?6;4c".to_vec());
 	}
@@ -3580,16 +3579,17 @@ mod tests {
 		// remote's title and body are consumed as OSC payloads, never printed as characters.
 		let mut terminal = Terminal::new(4, 40);
 		terminal.process(b"\x1b]9;4;1;30\x07\x1b]2;window\x07");
-		assert!(terminal.process(b"\x1b]9;Build finished\x07").is_empty());
-		assert!(
-			terminal
-				.process(b"\x1b]777;notify;Build;finished in 4s\x07")
-				.is_empty()
+		assert_eq!(
+			terminal.process(b"\x1b]9;Build finished\x07"),
+			[] as [u8; 0]
 		);
-		assert!(
-			terminal
-				.process(b"\x1b]99;i=1:d=0:p=title;Build finished\x07")
-				.is_empty()
+		assert_eq!(
+			terminal.process(b"\x1b]777;notify;Build;finished in 4s\x07"),
+			[] as [u8; 0]
+		);
+		assert_eq!(
+			terminal.process(b"\x1b]99;i=1:d=0:p=title;Build finished\x07"),
+			[] as [u8; 0]
 		);
 		assert_eq!(terminal.progress(), progress::Progress::Working(30));
 		assert_eq!(terminal.title().as_deref(), Some("window"));
@@ -3636,7 +3636,7 @@ mod tests {
 	fn plain_output_prompts_no_reply() {
 		// Ordinary text and moves carry no query, so nothing is sent back.
 		let mut terminal = Terminal::new(10, 40);
-		assert!(terminal.process(b"hello\r\n\x1b[2;3Hworld").is_empty());
+		assert_eq!(terminal.process(b"hello\r\n\x1b[2;3Hworld"), [] as [u8; 0]);
 	}
 
 	#[test]
@@ -3683,7 +3683,7 @@ mod tests {
 		// The query arrives in two packets; the parser buffers across them and the reply
 		// comes with the packet that finishes it.
 		let mut terminal = Terminal::new(10, 40);
-		assert!(terminal.process(b"\x1b[6").is_empty());
+		assert_eq!(terminal.process(b"\x1b[6"), [] as [u8; 0]);
 		assert_eq!(terminal.process(b"n"), b"\x1b[1;1R".to_vec());
 	}
 
@@ -3758,7 +3758,10 @@ mod tests {
 		// half of the refusal structural, but the reply's half was resting on nobody happening to
 		// wire `Term::colors` into `report_color`. This test is what would notice.
 		let mut terminal = Terminal::new(10, 40);
-		assert!(terminal.process(b"\x1b]4;3;rgb:ff/00/00\x07").is_empty());
+		assert_eq!(
+			terminal.process(b"\x1b]4;3;rgb:ff/00/00\x07"),
+			[] as [u8; 0]
+		);
 		assert!(terminal.term.colors()[3].is_some());
 		assert_eq!(
 			terminal.process(b"\x1b]4;3;?\x07"),
@@ -3776,7 +3779,7 @@ mod tests {
 		// honouring the set in the reply alone would be worse than either honouring it fully or
 		// refusing it fully.
 		let mut terminal = Terminal::new(10, 40);
-		assert!(terminal.process(b"\x1b]11;rgb:ff/00/00\x07").is_empty());
+		assert_eq!(terminal.process(b"\x1b]11;rgb:ff/00/00\x07"), [] as [u8; 0]);
 		assert!(terminal.term.colors()[NamedColor::Background as usize].is_some());
 		assert_eq!(
 			terminal.process(b"\x1b]11;?\x07"),
@@ -3811,7 +3814,10 @@ mod tests {
 		// refused because of the protocol it opens, not because cmote will not say how big a cell is.
 		let mut terminal = Terminal::new(10, 40);
 		terminal.set_cell_pixels(8, 17);
-		assert!(terminal.process(b"\x1b]1337;ReportCellSize\x07").is_empty());
+		assert_eq!(
+			terminal.process(b"\x1b]1337;ReportCellSize\x07"),
+			[] as [u8; 0]
+		);
 		assert_eq!(terminal.process(b"\x1b[14t"), b"\x1b[4;170;320t".to_vec());
 		assert_eq!(terminal.process(b"\x1b[16t"), b"\x1b[6;17;8t".to_vec());
 	}
@@ -3880,9 +3886,9 @@ mod tests {
 		let mut terminal = Terminal::new(10, 40);
 		terminal.set_cell_pixels(8, 17);
 		assert_eq!(terminal.process(b"\x1b[?2048h"), REPORT_10_BY_40.to_vec());
-		assert!(terminal.process(b"\x1b[?2048h").is_empty());
+		assert_eq!(terminal.process(b"\x1b[?2048h"), [] as [u8; 0]);
 		// And off, then on again, is a transition — so it reports.
-		assert!(terminal.process(b"\x1b[?2048l").is_empty());
+		assert_eq!(terminal.process(b"\x1b[?2048l"), [] as [u8; 0]);
 		assert_eq!(terminal.process(b"\x1b[?2048h"), REPORT_10_BY_40.to_vec());
 	}
 
@@ -3904,7 +3910,7 @@ mod tests {
 			REPORT_10_BY_40.to_vec(),
 			"and every change after that"
 		);
-		assert!(terminal.process(b"\x1b[?2048l").is_empty());
+		assert_eq!(terminal.process(b"\x1b[?2048l"), [] as [u8; 0]);
 		assert!(terminal.resize(20, 60).is_empty(), "asked to stop");
 	}
 
@@ -4418,7 +4424,7 @@ mod tests {
 		// A title is state, not a host reply, so `process` must return no bytes for it — the
 		// input channel is for keystrokes and query answers only.
 		let mut terminal = Terminal::new(10, 40);
-		assert!(terminal.process(b"\x1b]2;build\x07").is_empty());
+		assert_eq!(terminal.process(b"\x1b]2;build\x07"), [] as [u8; 0]);
 	}
 
 	#[test]
@@ -4428,7 +4434,7 @@ mod tests {
 		// title set FIRST, so what this shows is the title SURVIVING — §77's ordering.
 		let mut terminal = Terminal::new(10, 40);
 		terminal.process(b"\x1b]2;window\x07");
-		assert!(terminal.process(b"\x1b]9;3;\"build\"\x07").is_empty());
+		assert_eq!(terminal.process(b"\x1b]9;3;\"build\"\x07"), [] as [u8; 0]);
 		assert_eq!(terminal.icon_name(), Some("build"));
 		assert_eq!(terminal.title().as_deref(), Some("window"));
 		// And the standard spelling still wins the field afterwards — one writer, two doors.
@@ -4444,11 +4450,10 @@ mod tests {
 	fn a_remotes_sleep_and_message_box_get_nothing() {
 		let mut terminal = Terminal::new(4, 20);
 		terminal.process(b"\x1b]1;kept\x07");
-		assert!(terminal.process(b"\x1b]9;1;5000\x07").is_empty());
-		assert!(
-			terminal
-				.process(b"\x1b]9;2;\"are you sure?\"\x07")
-				.is_empty()
+		assert_eq!(terminal.process(b"\x1b]9;1;5000\x07"), [] as [u8; 0]);
+		assert_eq!(
+			terminal.process(b"\x1b]9;2;\"are you sure?\"\x07"),
+			[] as [u8; 0]
 		);
 		terminal.process(b"X");
 		assert_eq!(read(&terminal, 0, 0, 20), "X", "none of it was printed");
@@ -4468,15 +4473,13 @@ mod tests {
 	fn a_remotes_font_change_and_relaunch_specification_get_nothing() {
 		let mut terminal = Terminal::new(4, 40);
 		terminal.process(b"\x1b]1;kept\x07");
-		assert!(
-			terminal
-				.process(b"\x1b]60;regular=Comic Sans\x07")
-				.is_empty()
+		assert_eq!(
+			terminal.process(b"\x1b]60;regular=Comic Sans\x07"),
+			[] as [u8; 0]
 		);
-		assert!(
-			terminal
-				.process(b"\x1b]88;arm;cmd=c3No;args=aG9zdA==\x07")
-				.is_empty()
+		assert_eq!(
+			terminal.process(b"\x1b]88;arm;cmd=c3No;args=aG9zdA==\x07"),
+			[] as [u8; 0]
 		);
 		assert!(
 			terminal.process(b"\x1b]88;query\x07").is_empty(),
@@ -4493,7 +4496,7 @@ mod tests {
 	fn the_third_tab_name_spelling_reaches_the_same_chip() {
 		let mut terminal = Terminal::new(4, 40);
 		terminal.process(b"\x1b]2;window\x07");
-		assert!(terminal.process(b"\x1b]30;build\x07").is_empty());
+		assert_eq!(terminal.process(b"\x1b]30;build\x07"), [] as [u8; 0]);
 		assert_eq!(terminal.icon_name(), Some("build"));
 		assert_eq!(
 			terminal.title().as_deref(),
@@ -4509,7 +4512,7 @@ mod tests {
 		// exactly as it was. Setting one is state, not a reply, so no bytes go back either.
 		let mut terminal = Terminal::new(10, 40);
 		terminal.process(b"\x1b]2;window\x07");
-		assert!(terminal.process(b"\x1b]1;vim\x07").is_empty());
+		assert_eq!(terminal.process(b"\x1b]1;vim\x07"), [] as [u8; 0]);
 		assert_eq!(terminal.icon_name(), Some("vim"));
 		assert_eq!(terminal.title().as_deref(), Some("window"));
 	}
@@ -4538,7 +4541,7 @@ mod tests {
 		// Setting one is state and not a reply, so no bytes go back either.
 		let mut terminal = Terminal::new(10, 40);
 		terminal.process(b"\x1b]2;window\x07\x1b]1;vim\x07");
-		assert!(terminal.process(b"\x1b]22;pointer\x07").is_empty());
+		assert_eq!(terminal.process(b"\x1b]22;pointer\x07"), [] as [u8; 0]);
 		assert_eq!(terminal.pointer_shape(), pointer::Shape::Pointer);
 		assert_eq!(terminal.title().as_deref(), Some("window"));
 		assert_eq!(terminal.icon_name(), Some("vim"));
@@ -4983,7 +4986,7 @@ mod tests {
 		assert_eq!(terminal.user_mark_rows(), vec![2]);
 		// And it is not mistaken for a prompt, which would tick it in the wrong colour and give it a
 		// command's output span it does not have.
-		assert!(terminal.prompt_rows().is_empty());
+		assert_eq!(terminal.prompt_rows(), [] as [u16; 0]);
 	}
 
 	#[test]
@@ -5149,7 +5152,10 @@ mod tests {
 		);
 		// The query is matched case-insensitively, and a query nothing carries finds nothing.
 		assert_eq!(terminal.find("BRAVO").len(), 1);
-		assert!(terminal.find("nowhere").is_empty());
+		assert_eq!(
+			terminal.find("nowhere"),
+			[] as [crate::term::search::SearchMatch; 0]
+		);
 	}
 
 	/// A sixel DCS painting a solid red rectangle `width` pixels wide and `bands * 6` tall — the
@@ -6007,7 +6013,7 @@ mod tests {
 		let mut terminal = Terminal::new(10, 40);
 		terminal.set_cell_pixels(8, 17);
 		assert_eq!(terminal.process(b"\x1b[?2048h"), REPORT_10_BY_40.to_vec());
-		assert!(terminal.process(b"\x1b[?2048s\x1b[?2048l").is_empty());
+		assert_eq!(terminal.process(b"\x1b[?2048s\x1b[?2048l"), [] as [u8; 0]);
 		assert_eq!(
 			terminal.process(b"\x1b[?2048$p"),
 			b"\x1b[?2048;2$y".to_vec(),
@@ -7023,8 +7029,8 @@ mod tests {
 		// The gap is where it was asked for, not at the end of the row.
 		let screen = terminal.screen();
 		assert_eq!(screen.cell(1, 1).unwrap().contents(), "b");
-		assert!(screen.cell(1, 2).unwrap().contents().is_empty());
-		assert!(screen.cell(1, 4).unwrap().contents().is_empty());
+		assert_eq!(screen.cell(1, 2).unwrap().contents(), "");
+		assert_eq!(screen.cell(1, 4).unwrap().contents(), "");
 		assert_eq!(screen.cell(1, 5).unwrap().contents(), "b");
 	}
 
@@ -7051,13 +7057,13 @@ mod tests {
 		terminal.process(b"\x1b[1m\x1b[45;2;2;2;4$x");
 		assert_eq!(read(&terminal, 1, 0, 8), "---");
 		let screen = terminal.screen();
-		assert!(screen.cell(1, 0).unwrap().contents().is_empty());
+		assert_eq!(screen.cell(1, 0).unwrap().contents(), "");
 		assert_eq!(screen.cell(1, 1).unwrap().contents(), "-");
 		assert!(
 			screen.cell(1, 1).unwrap().bold(),
 			"filled in the pen's attributes"
 		);
-		assert!(screen.cell(1, 4).unwrap().contents().is_empty());
+		assert_eq!(screen.cell(1, 4).unwrap().contents(), "");
 		assert_eq!(
 			read(&terminal, 0, 0, 8).trim(),
 			"",
@@ -7421,7 +7427,7 @@ mod tests {
 		terminal.process(b"\x1b]133;A\x07$ ls\r\na\r\nb\r\nc\r\nd\r\ne");
 		assert_eq!(terminal.screen().history_size(), 2);
 		// The prompt is above the page now, so no tick is drawn.
-		assert!(terminal.prompt_rows().is_empty());
+		assert_eq!(terminal.prompt_rows(), [] as [u16; 0]);
 
 		terminal.process(b"\x1b[2+T");
 		// It came back onto the page, and the tick is beside it — on the row the text is actually on.

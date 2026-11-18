@@ -198,7 +198,7 @@ mod tests {
 		}
 		// The text-area spelling of the position question, which carries a second parameter and would
 		// leak the same fact by another door.
-		assert!(scan(&window_op("13;2")).is_empty());
+		assert_eq!(scan(&window_op("13;2")), [] as [usize; 0]);
 	}
 
 	/// The ten commands, which are part 6's refusal and are not questions at all. Several take further
@@ -206,7 +206,7 @@ mod tests {
 	#[test]
 	fn the_window_commands_are_not_cell_size_requests() {
 		for params in ["1", "2", "3;100;200", "4;480;640", "5", "9;1", "10;2"] {
-			assert!(scan(&window_op(params)).is_empty());
+			assert_eq!(scan(&window_op(params)), [] as [usize; 0]);
 		}
 	}
 
@@ -215,21 +215,21 @@ mod tests {
 	/// second one, which is the distinction `param_count` exists to keep (§111).
 	#[test]
 	fn a_second_parameter_rules_it_out() {
-		assert!(scan(&window_op("16;2")).is_empty());
-		assert!(scan(&window_op("16;")).is_empty());
+		assert_eq!(scan(&window_op("16;2")), [] as [usize; 0]);
+		assert_eq!(scan(&window_op("16;")), [] as [usize; 0]);
 		// A sub-parameter is excluded by the same count test, without a rule of its own.
-		assert!(scan(&window_op("16:2")).is_empty());
+		assert_eq!(scan(&window_op("16:2")), [] as [usize; 0]);
 	}
 
 	/// An omitted parameter defaults to 1 — de-iconify, a command — so a bare `CSI t` is not this
 	/// question. And the match is on the whole number rather than a prefix of it.
 	#[test]
 	fn only_the_whole_number_matches() {
-		assert!(scan(&window_op("")).is_empty());
-		assert!(scan(&window_op("1")).is_empty());
-		assert!(scan(&window_op("6")).is_empty());
-		assert!(scan(&window_op("160")).is_empty());
-		assert!(scan(&window_op("116")).is_empty());
+		assert_eq!(scan(&window_op("")), [] as [usize; 0]);
+		assert_eq!(scan(&window_op("1")), [] as [usize; 0]);
+		assert_eq!(scan(&window_op("6")), [] as [usize; 0]);
+		assert_eq!(scan(&window_op("160")), [] as [usize; 0]);
+		assert_eq!(scan(&window_op("116")), [] as [usize; 0]);
 		// A padded 16 is still 16: the framer drops leading zeros rather than counting them (§111).
 		assert_eq!(scan(&window_op("0016")).len(), 1);
 	}
@@ -246,8 +246,8 @@ mod tests {
 				char::from(marker)
 			);
 		}
-		assert!(scan(b"\x1b[16 t").is_empty());
-		assert!(scan(b"\x1b[16$t").is_empty());
+		assert_eq!(scan(b"\x1b[16 t"), [] as [usize; 0]);
+		assert_eq!(scan(b"\x1b[16$t"), [] as [usize; 0]);
 	}
 
 	/// Output arrives in chunks of whatever size the pty hands over, so the state machine has to carry
@@ -255,9 +255,9 @@ mod tests {
 	#[test]
 	fn a_sequence_split_across_chunks_is_still_found() {
 		let mut reports = WindowReports::default();
-		assert!(reports.feed(b"\x1b").is_empty());
-		assert!(reports.feed(b"[1").is_empty());
-		assert!(reports.feed(b"6").is_empty());
+		assert_eq!(reports.feed(b"\x1b"), [] as [usize; 0]);
+		assert_eq!(reports.feed(b"[1"), [] as [usize; 0]);
+		assert_eq!(reports.feed(b"6"), [] as [usize; 0]);
 		// The offset is into THIS chunk, which is where the interruption advance uses it.
 		assert_eq!(reports.feed(b"t"), vec![1]);
 	}

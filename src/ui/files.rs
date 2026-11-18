@@ -1584,7 +1584,10 @@ mod tests {
 
 		// In the gap between two rows: touching nothing selects nothing.
 		let gap = HEADER_HEIGHT + row_top(1) - CELL_SPACING / 2.0;
-		assert!(band_hits(band(0.0, gap, 1000.0, 0.0), columns, count, 0.0).is_empty());
+		assert_eq!(
+			band_hits(band(0.0, gap, 1000.0, 0.0), columns, count, 0.0),
+			[] as [usize; 0]
+		);
 	}
 
 	#[test]

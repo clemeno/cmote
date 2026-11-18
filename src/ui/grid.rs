@@ -2543,7 +2543,7 @@ mod tests {
 		);
 
 		// And no hits means no allocation and no washes at all — the shut-bar case.
-		assert!(match_mask(&[], 2, 4).is_empty());
+		assert_eq!(match_mask(&[], 2, 4), [] as [bool; 0]);
 	}
 
 	#[test]

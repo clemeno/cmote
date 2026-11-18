@@ -1144,8 +1144,7 @@ impl Editor {
 		self.content
 			.lines()
 			.next()
-			.map(|line| line.text.into_owned())
-			.unwrap_or_default()
+			.map_or_default(|line| line.text.into_owned())
 	}
 
 	/// The line ending the buffer uses, for the toolbar ("LF" / "CRLF" / "CR"). A buffer with no
@@ -1565,7 +1564,7 @@ mod tests {
 		// An offset past the end is clamped to the line's width rather than panicking.
 		assert_eq!(display_columns_at("ab", &[99]), vec![2]);
 		// Nothing asked for, nothing walked.
-		assert!(display_columns_at("ab\tcd", &[]).is_empty());
+		assert_eq!(display_columns_at("ab\tcd", &[]), [] as [usize; 0]);
 	}
 
 	#[test]
@@ -1584,10 +1583,10 @@ mod tests {
 			vec![1, 3]
 		);
 		// A window with no hits in it is empty, not the whole list.
-		assert!(find.spans_between(2, 3).is_empty());
+		assert_eq!(find.spans_between(2, 3), []);
 		// And an empty or inverted window cannot panic on the slice.
-		assert!(find.spans_between(2, 2).is_empty());
-		assert!(find.spans_between(4, 1).is_empty());
+		assert_eq!(find.spans_between(2, 2), []);
+		assert_eq!(find.spans_between(4, 1), []);
 	}
 
 	#[test]
@@ -1599,7 +1598,10 @@ mod tests {
 			vec![0, 2]
 		);
 		// An empty query is idle, not "everything".
-		assert!(find_matches(&lines(&["anything"]), "").is_empty());
+		assert_eq!(
+			find_matches(&lines(&["anything"]), ""),
+			[] as [EditorMatch; 0]
+		);
 	}
 
 	#[test]

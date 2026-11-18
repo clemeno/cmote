@@ -109,7 +109,7 @@ mod platform {
 		set_active_alt: *const c_void,  // slot 7
 		mark_fullscreen_window: *const c_void, // ITaskbarList2, slot 8
 		set_progress_value: unsafe extern "system" fn(*mut Interface, HWND, u64, u64) -> i32, // ITaskbarList3, slot 9
-		set_progress_state: unsafe extern "system" fn(*mut Interface, HWND, u32) -> i32,      // slot 10
+		set_progress_state: unsafe extern "system" fn(*mut Interface, HWND, u32) -> i32, // slot 10
 	}
 
 	/// A COM object is a pointer to a pointer to its vtable, which is all this needs to be.

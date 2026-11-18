@@ -196,8 +196,8 @@ mod tests {
 	/// somebody else's two bytes.
 	#[test]
 	fn the_space_intermediate_is_required() {
-		assert!(scan(b"\x1bG").is_empty());
-		assert!(scan(b"\x1bF").is_empty());
+		assert_eq!(scan(b"\x1bG"), [] as [(usize, bool); 0]);
+		assert_eq!(scan(b"\x1bF"), [] as [(usize, bool); 0]);
 		assert!(scan(b"\x1b(G").is_empty(), "a charset slot is not a space");
 		assert!(scan(b"\x1b  G").is_empty(), "two spaces is not one");
 	}
@@ -205,8 +205,8 @@ mod tests {
 	#[test]
 	fn a_sequence_split_across_chunks_is_still_found() {
 		let mut scanner = Controls::default();
-		assert!(scanner.feed(b"\x1b").is_empty());
-		assert!(scanner.feed(b" ").is_empty());
+		assert_eq!(scanner.feed(b"\x1b"), [] as [(usize, bool); 0]);
+		assert_eq!(scanner.feed(b" "), [] as [(usize, bool); 0]);
 		assert_eq!(scanner.feed(b"G"), vec![(1, true)]);
 	}
 

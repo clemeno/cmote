@@ -804,7 +804,7 @@ mod tests {
 		// zsh's PS2 under kitty's shell integration, once per continuation line of a command still
 		// being typed. It must not anchor a prompt: the ticks would multiply and the command would
 		// be filed against its last continuation line (§97).
-		assert!(marks(b"\x1b]133;A;k=s\x07").is_empty());
+		assert_eq!(marks(b"\x1b]133;A;k=s\x07"), [] as [Mark; 0]);
 		// A real prompt carries no `k=` — and fish's own field on the same mark is not a kind, so
 		// it stays a prompt start.
 		assert_eq!(marks(b"\x1b]133;A\x07"), vec![Mark::PromptStart]);
@@ -871,7 +871,7 @@ mod tests {
 		// `L` asks the terminal to WRITE — "if the cursor is the initial column, do nothing; otherwise
 		// do the equivalent of `\r\n`" — and this scanner observes (§164). It produces no mark, and
 		// this test is what stops it quietly becoming one the next time the letter list is widened.
-		assert!(marks(b"\x1b]133;L\x07").is_empty());
+		assert_eq!(marks(b"\x1b]133;L\x07"), [] as [Mark; 0]);
 		// And the refusal is inert rather than disruptive: a stream that sprinkles `L` between the real
 		// marks reads exactly as the same stream without it. What the user loses is the line break the
 		// shell asked for, which is the cost the row names — not a mark, and not an offset.
@@ -888,11 +888,11 @@ mod tests {
 		assert_eq!(marks(b"\x1b]133;P;k=i\x07"), vec![Mark::PromptStart]);
 		// Both spellings of the continuation kind are suppressed, on either letter — the field means
 		// the same thing wherever it rides.
-		assert!(marks(b"\x1b]133;P;k=c\x07").is_empty());
-		assert!(marks(b"\x1b]133;P;k=s\x07").is_empty());
-		assert!(marks(b"\x1b]133;A;k=c\x07").is_empty());
+		assert_eq!(marks(b"\x1b]133;P;k=c\x07"), [] as [Mark; 0]);
+		assert_eq!(marks(b"\x1b]133;P;k=s\x07"), [] as [Mark; 0]);
+		assert_eq!(marks(b"\x1b]133;A;k=c\x07"), [] as [Mark; 0]);
 		// And so is the right-side kind, which decorates a line another mark is responsible for.
-		assert!(marks(b"\x1b]133;P;k=r\x07").is_empty());
+		assert_eq!(marks(b"\x1b]133;P;k=r\x07"), [] as [Mark; 0]);
 		// An unrecognised kind still keeps the mark, which is §97's rule and unchanged: losing a jump
 		// anchor is worse than gaining one, so the recoverable guess wins.
 		assert_eq!(marks(b"\x1b]133;P;k=v\x07"), vec![Mark::PromptStart]);
@@ -976,7 +976,7 @@ mod tests {
 		assert_eq!(marks(b"\x1b]133;N\x07"), vec![Mark::PromptStart]);
 		// The fields are read the same way they are on `A`: a continuation prompt is still not a new
 		// prompt when the letter is `N`.
-		assert!(marks(b"\x1b]133;N;k=s\x07").is_empty());
+		assert_eq!(marks(b"\x1b]133;N;k=s\x07"), [] as [Mark; 0]);
 		// And the implicit termination is the one `apply` already performs: a command left half-built by
 		// a stream that never sent its `D` is superseded rather than filed. Lines 0 and 1 open a command
 		// that never ends; the prompt on line 4 abandons it; lines 5 and 6 are the command that does.
@@ -1027,7 +1027,7 @@ mod tests {
 		// Output arrives in arbitrary chunks, including a split inside the payload; the mark
 		// completes with the chunk that carries its terminator, and its offset is measured there.
 		let mut scanner = Scanner::default();
-		assert!(scanner.feed(b"prompt$ \x1b]133;").is_empty());
+		assert_eq!(scanner.feed(b"prompt$ \x1b]133;"), [] as [(usize, Mark); 0]);
 		let found = scanner.feed(b"A\x07after");
 		assert_eq!(found, vec![(2, Mark::PromptStart)]);
 	}
@@ -1036,7 +1036,7 @@ mod tests {
 	fn a_split_between_the_esc_and_the_bracket_is_still_read() {
 		// The nastiest boundary: the chunk ends right after the ESC, before the `]`.
 		let mut scanner = Scanner::default();
-		assert!(scanner.feed(b"\x1b").is_empty());
+		assert_eq!(scanner.feed(b"\x1b"), [] as [(usize, Mark); 0]);
 		assert_eq!(
 			marks_of(scanner.feed(b"]133;C\x07")),
 			vec![Mark::OutputStart]
@@ -1047,16 +1047,16 @@ mod tests {
 	fn other_osc_sequences_are_ignored() {
 		// A cwd announcement (OSC 7), a title (OSC 0) and a clipboard write (OSC 52) all pass
 		// through this scanner: they are not OSC 133, so no mark comes out.
-		assert!(marks(b"\x1b]7;file://host/home\x07").is_empty());
-		assert!(marks(b"\x1b]0;a window title\x07").is_empty());
-		assert!(marks(b"\x1b]52;c;Zm9v\x07").is_empty());
+		assert_eq!(marks(b"\x1b]7;file://host/home\x07"), [] as [Mark; 0]);
+		assert_eq!(marks(b"\x1b]0;a window title\x07"), [] as [Mark; 0]);
+		assert_eq!(marks(b"\x1b]52;c;Zm9v\x07"), [] as [Mark; 0]);
 	}
 
 	#[test]
 	fn a_longer_number_is_not_mistaken_for_a_phase_letter() {
 		// OSC 133 is our number; a different OSC that merely starts with those digits (there is
 		// none standard, but a malformed `1330;A` must not match) is refused.
-		assert!(marks(b"\x1b]1330;A\x07").is_empty());
+		assert_eq!(marks(b"\x1b]1330;A\x07"), [] as [Mark; 0]);
 	}
 
 	#[test]
@@ -1066,7 +1066,7 @@ mod tests {
 		let mut scanner = Scanner::default();
 		scanner.feed(b"\x1b]133;A;");
 		scanner.feed(&vec![b'x'; MAX_PAYLOAD + 10]);
-		assert!(scanner.feed(b"\x07").is_empty());
+		assert_eq!(scanner.feed(b"\x07"), [] as [(usize, Mark); 0]);
 		assert_eq!(
 			marks_of(scanner.feed(b"\x1b]133;C\x07")),
 			vec![Mark::OutputStart]
@@ -1119,7 +1119,7 @@ mod tests {
 		// view is at the live bottom, would sit at viewport row 2 - 5 = -3: off the top, dropped.
 		let mut prompts = Prompts::default();
 		prompts.apply(Mark::PromptStart, 2, 0);
-		assert!(prompts.visible_rows(5, 0, 24).is_empty());
+		assert_eq!(prompts.visible_rows(5, 0, 24), [] as [u16; 0]);
 		// Scrolling back 3 lines (display_offset 3) brings it to viewport row 0 again.
 		assert_eq!(prompts.visible_rows(5, 3, 24), vec![0]);
 	}
@@ -1158,7 +1158,7 @@ mod tests {
 		let mut prompts = Prompts::default();
 		prompts.record_user_mark(10, 2);
 		assert_eq!(prompts.visible_user_rows(10, 0, 24), vec![2]);
-		assert!(prompts.visible_rows(10, 0, 24).is_empty());
+		assert_eq!(prompts.visible_rows(10, 0, 24), [] as [u16; 0]);
 	}
 
 	#[test]
@@ -1206,8 +1206,8 @@ mod tests {
 		prompts.apply(Mark::PromptStart, 0, 1);
 		prompts.record_user_mark(0, 2);
 		prompts.clear();
-		assert!(prompts.visible_rows(0, 0, 24).is_empty());
-		assert!(prompts.visible_user_rows(0, 0, 24).is_empty());
+		assert_eq!(prompts.visible_rows(0, 0, 24), [] as [u16; 0]);
+		assert_eq!(prompts.visible_user_rows(0, 0, 24), [] as [u16; 0]);
 	}
 
 	#[test]

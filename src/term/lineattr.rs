@@ -224,10 +224,10 @@ mod tests {
 	/// Reading it as a line attribute would leave a conformance suite's alignment page double width.
 	#[test]
 	fn the_alignment_test_is_not_a_line_attribute() {
-		assert!(scan(b"\x1b#8").is_empty());
+		assert_eq!(scan(b"\x1b#8"), [] as [(usize, LineAttribute); 0]);
 		assert!(scan(b"\x1b#1").is_empty(), "and nor is an undefined final");
-		assert!(scan(b"\x1b#2").is_empty());
-		assert!(scan(b"\x1b#7").is_empty());
+		assert_eq!(scan(b"\x1b#2"), [] as [(usize, LineAttribute); 0]);
+		assert_eq!(scan(b"\x1b#7"), [] as [(usize, LineAttribute); 0]);
 	}
 
 	/// The intermediate is what makes it this family — `ESC 6` and `ESC 3` without it are somebody
@@ -235,7 +235,7 @@ mod tests {
 	#[test]
 	fn the_hash_intermediate_is_required() {
 		assert!(scan(b"\x1b6").is_empty(), "DECBI");
-		assert!(scan(b"\x1b3").is_empty());
+		assert_eq!(scan(b"\x1b3"), [] as [(usize, LineAttribute); 0]);
 		assert!(scan(b"\x1b(6").is_empty(), "a charset slot is not a hash");
 		assert!(scan(b"\x1b##6").is_empty(), "two hashes is not one");
 	}
@@ -243,8 +243,8 @@ mod tests {
 	#[test]
 	fn a_sequence_split_across_chunks_is_still_found() {
 		let mut scanner = LineAttributes::default();
-		assert!(scanner.feed(b"\x1b").is_empty());
-		assert!(scanner.feed(b"#").is_empty());
+		assert_eq!(scanner.feed(b"\x1b"), [] as [(usize, LineAttribute); 0]);
+		assert_eq!(scanner.feed(b"#"), [] as [(usize, LineAttribute); 0]);
 		assert_eq!(scanner.feed(b"6"), vec![(1, LineAttribute::DoubleWidth)]);
 	}
 

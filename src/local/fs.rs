@@ -394,7 +394,7 @@ fn read_entries(directory: &Path) -> Result<Vec<Entry>, String> {
 		let meta = entry.metadata().ok();
 		entries.push(Entry {
 			kind: kind_of(meta.as_ref()),
-			meta: meta.as_ref().map(meta_of).unwrap_or_default(),
+			meta: meta.as_ref().map_or_default(meta_of),
 			name,
 		});
 	}

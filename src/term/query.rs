@@ -621,17 +621,17 @@ mod tests {
 	/// be `0` when a `;` is not; `param_count` says it on purpose (§111).
 	#[test]
 	fn a_second_parameter_is_not_the_default_form() {
-		assert!(scan(b"\x1b[>0;0q").is_empty());
-		assert!(scan(b"\x1b[>;q").is_empty());
-		assert!(scan(b"\x1b[=0;0c").is_empty());
+		assert_eq!(scan(b"\x1b[>0;0q"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[>;q"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[=0;0c"), [] as [Query; 0]);
 	}
 
 	/// A sub-parameter is a spelling none of the three defines, and the engine has no arm behind any of
 	/// them — so cmote is the only actor and refusing costs nothing (`Csi::sub_parameters`).
 	#[test]
 	fn a_sub_parameter_is_none_of_these_queries() {
-		assert!(scan(b"\x1b[>0:0q").is_empty());
-		assert!(scan(b"\x1b[?1:2S").is_empty());
+		assert_eq!(scan(b"\x1b[>0:0q"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[?1:2S"), [] as [Query; 0]);
 		// The `;` spelling of the graphics request IS one, so this is about the separator.
 		assert_eq!(
 			scan(b"\x1b[?1;2S"),
@@ -644,9 +644,9 @@ mod tests {
 	/// no state for an intermediate at all and abandoned the sequence on one.
 	#[test]
 	fn an_intermediate_byte_rules_all_three_out() {
-		assert!(scan(b"\x1b[> q").is_empty());
-		assert!(scan(b"\x1b[= c").is_empty());
-		assert!(scan(b"\x1b[?1;2 S").is_empty());
+		assert_eq!(scan(b"\x1b[> q"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[= c"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[?1;2 S"), [] as [Query; 0]);
 		assert!(scan(b"\x1b[?4$p").is_empty(), "DECRQM, the engine's");
 	}
 
@@ -657,8 +657,8 @@ mod tests {
 		assert_eq!(scan(b"\x1b[>0\nq"), vec![Query::Version]);
 		assert_eq!(scan(b"\x1b[=\x7fc"), vec![Query::UnitId]);
 		// CAN and SUB are the only two bytes that really cancel a sequence in flight.
-		assert!(scan(b"\x1b[>0\x18q").is_empty());
-		assert!(scan(b"\x1b[=\x1ac").is_empty());
+		assert_eq!(scan(b"\x1b[>0\x18q"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[=\x1ac"), [] as [Query; 0]);
 	}
 
 	#[test]
@@ -672,10 +672,10 @@ mod tests {
 	fn other_private_csi_sequences_are_not_version_requests() {
 		// The `CSI >` prefix is shared: XTMODKEYS ends in `m`, kitty in `u`, DA2 in `c`, and a
 		// non-zero-parametered `q` is a different private query — none is XTVERSION.
-		assert!(scan(b"\x1b[>4;2m").is_empty());
-		assert!(scan(b"\x1b[>1u").is_empty());
-		assert!(scan(b"\x1b[>c").is_empty());
-		assert!(scan(b"\x1b[>1q").is_empty());
+		assert_eq!(scan(b"\x1b[>4;2m"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[>1u"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[>c"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[>1q"), [] as [Query; 0]);
 	}
 
 	#[test]
@@ -690,12 +690,12 @@ mod tests {
 		// DA1 (`CSI c`) and DA2 (`CSI > c`) the engine answers itself, so the scanner must not
 		// also claim them — a doubled reply would confuse the program that asked. And a
 		// parametered `CSI = 1 c` is some other private sequence, not the unit-id request.
-		assert!(scan(b"\x1b[c").is_empty());
-		assert!(scan(b"\x1b[0c").is_empty());
-		assert!(scan(b"\x1b[>c").is_empty());
-		assert!(scan(b"\x1b[=1c").is_empty());
+		assert_eq!(scan(b"\x1b[c"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[0c"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[>c"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[=1c"), [] as [Query; 0]);
 		// A `CSI =` sequence ending in some other final byte is not DA3 either.
-		assert!(scan(b"\x1b[=m").is_empty());
+		assert_eq!(scan(b"\x1b[=m"), [] as [Query; 0]);
 	}
 
 	#[test]
@@ -848,7 +848,7 @@ mod tests {
 	fn a_sixel_dcs_does_not_trip_the_scanner() {
 		// An unrecognised DCS (here a sixel `DCS q … ST`) is followed to its terminator and read
 		// as nothing — even though its data contains bytes that look like a `>q` version request.
-		assert!(scan(b"\x1bPq\"1;1;10;10#0>q\x1b\\").is_empty());
+		assert_eq!(scan(b"\x1bPq\"1;1;10;10#0>q\x1b\\"), [] as [Query; 0]);
 	}
 
 	#[test]
@@ -856,9 +856,9 @@ mod tests {
 		// Output arrives in arbitrary chunks; a version request split after the `>` still reads,
 		// and a DCS split mid-data completes on the chunk that terminates it.
 		let mut queries = Queries::default();
-		assert!(queries.feed(b"text\x1b[>").is_empty());
+		assert_eq!(queries.feed(b"text\x1b[>"), [] as [Query; 0]);
 		assert_eq!(queries.feed(b"qmore"), vec![Query::Version]);
-		assert!(queries.feed(b"\x1bP+q54").is_empty());
+		assert_eq!(queries.feed(b"\x1bP+q54"), [] as [Query; 0]);
 		assert_eq!(
 			queries.feed(b"4E\x1b\\"),
 			vec![Query::Capabilities(vec![b"544E".to_vec()])]
@@ -1047,12 +1047,12 @@ mod tests {
 		// The `CSI ?` prefix is shared with every DECSET/DECRST there is, plus DECRQM and the kitty
 		// keyboard query — all the engine's, and none of them ending in `S`. A request with too few
 		// parameters is malformed and stays unanswered.
-		assert!(scan(b"\x1b[?1049h").is_empty());
-		assert!(scan(b"\x1b[?25l").is_empty());
-		assert!(scan(b"\x1b[?2026$p").is_empty());
-		assert!(scan(b"\x1b[?u").is_empty());
-		assert!(scan(b"\x1b[?1S").is_empty());
-		assert!(scan(b"\x1b[?S").is_empty());
+		assert_eq!(scan(b"\x1b[?1049h"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[?25l"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[?2026$p"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[?u"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[?1S"), [] as [Query; 0]);
+		assert_eq!(scan(b"\x1b[?S"), [] as [Query; 0]);
 	}
 
 	#[test]
@@ -1120,7 +1120,7 @@ mod tests {
 			b"\x1b[?1u".to_vec()
 		);
 		// And an empty reply — the usual case — is returned as it came.
-		assert!(with_sixel_attribute(Vec::new()).is_empty());
+		assert_eq!(with_sixel_attribute(Vec::new()), [] as [u8; 0]);
 	}
 
 	#[test]
@@ -1159,16 +1159,16 @@ mod tests {
 	#[test]
 	fn the_near_misses_of_the_displayed_extent_request() {
 		// DECCRA, the rectangular copy `term/rect.rs` performs: same final byte, a `$` intermediate.
-		assert!(scan(b"[1;1;2;2;1;3;3;1$v").is_empty());
+		assert_eq!(scan(b"[1;1;2;2;1;3;3;1$v"), [] as [Query; 0]);
 		// DECSCA and DECSCL: same intermediate, another final byte each.
-		assert!(scan(b"[1\"q").is_empty());
-		assert!(scan(b"[61\"p").is_empty());
+		assert_eq!(scan(b"[1\"q"), [] as [Query; 0]);
+		assert_eq!(scan(b"[61\"p"), [] as [Query; 0]);
 		// No intermediate at all is not this sequence.
-		assert!(scan(b"[v").is_empty());
+		assert_eq!(scan(b"[v"), [] as [Query; 0]);
 		// And a private marker makes it somebody else's private sequence.
 		for marker in *b"?<=>" {
 			let request = [b"[".as_slice(), &[marker], b"\"v"].concat();
-			assert!(scan(&request).is_empty());
+			assert_eq!(scan(&request), [] as [Query; 0]);
 		}
 	}
 
@@ -1176,7 +1176,7 @@ mod tests {
 	/// the same rule XTVERSION and DA3 keep on their own final bytes.
 	#[test]
 	fn a_parameter_dec_never_defined_is_not_a_displayed_extent_request() {
-		assert!(scan(b"[1\"v").is_empty());
+		assert_eq!(scan(b"[1\"v"), [] as [Query; 0]);
 		assert!(scan(b"[0;0\"v").is_empty(), "and two of them is not one");
 	}
 

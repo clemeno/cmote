@@ -372,7 +372,10 @@ mod tests {
 		// DECRQM is `CSI Ps $ p` and `CSI ? Ps $ p` — the two arms `vte` DOES have for this final
 		// byte, and the engine answers both. Claiming either here would soft-reset the terminal
 		// every time a program asked what a mode was set to.
-		assert!(scan(b"\x1b[4$p\x1b[?7$p").is_empty());
+		assert_eq!(
+			scan(b"\x1b[4$p\x1b[?7$p"),
+			[] as [(usize, ProtectRequest); 0]
+		);
 	}
 
 	#[test]
@@ -382,10 +385,16 @@ mod tests {
 		let mut protect = Protect::default();
 		protect.feed(b"\x1b[1\"q");
 		protect.feed(b"\x1bc");
-		assert!(protect.feed(b"\x1b[31m").is_empty());
+		assert_eq!(
+			protect.feed(b"\x1b[31m"),
+			[] as [(usize, ProtectRequest); 0]
+		);
 		protect.feed(b"\x1b[1\"q");
 		protect.feed(b"\x1b[!p");
-		assert!(protect.feed(b"\x1b[31m").is_empty());
+		assert_eq!(
+			protect.feed(b"\x1b[31m"),
+			[] as [(usize, ProtectRequest); 0]
+		);
 	}
 
 	#[test]
@@ -408,14 +417,20 @@ mod tests {
 	#[test]
 	fn an_sgr_while_unarmed_is_not_reported() {
 		// The common case. An ordinary session is full of SGR and must cost nothing here.
-		assert!(scan(b"\x1b[31mred\x1b[0m").is_empty());
+		assert_eq!(
+			scan(b"\x1b[31mred\x1b[0m"),
+			[] as [(usize, ProtectRequest); 0]
+		);
 	}
 
 	#[test]
 	fn xtmodkeys_is_not_mistaken_for_an_sgr() {
 		// `CSI > 4 ; 2 m` ends in `m` but is a keyboard-mode request, not a pen change. The
 		// private marker is what tells them apart.
-		assert!(scan_armed(b"\x1b[>4;2m").is_empty());
+		assert_eq!(
+			scan_armed(b"\x1b[>4;2m"),
+			[] as [(usize, ProtectRequest); 0]
+		);
 	}
 
 	#[test]
@@ -423,7 +438,7 @@ mod tests {
 		// `CSI 1 SP q` (DECSCUSR) shares the final byte with DECSCA and differs only in the
 		// intermediate, so a scanner that ignored intermediates would arm the pen on a cursor
 		// shape change.
-		assert!(scan(b"\x1b[1 q").is_empty());
+		assert_eq!(scan(b"\x1b[1 q"), [] as [(usize, ProtectRequest); 0]);
 	}
 
 	#[test]
@@ -479,29 +494,38 @@ mod tests {
 		// Without the `?` these are ordinary ED and EL, which the engine handles — and handles
 		// differently: a plain `CSI 2 J` on the primary screen scrolls the viewport into history
 		// rather than blanking it in place. Claiming them here would break that.
-		assert!(scan(b"\x1b[2J\x1b[0J\x1b[2K\x1b[1K").is_empty());
+		assert_eq!(
+			scan(b"\x1b[2J\x1b[0J\x1b[2K\x1b[1K"),
+			[] as [(usize, ProtectRequest); 0]
+		);
 	}
 
 	#[test]
 	fn there_is_no_selective_erase_of_the_scrollback() {
 		// `CSI 3 J` drops the history; `CSI ? 3 J` is not a thing, because protection is a
 		// property of cells on the screen.
-		assert!(scan(b"\x1b[?3J").is_empty());
+		assert_eq!(scan(b"\x1b[?3J"), [] as [(usize, ProtectRequest); 0]);
 	}
 
 	#[test]
 	fn another_private_mode_sequence_is_ignored() {
 		// Hide-cursor and bracketed paste share the `?` marker with DECSED, so the final byte has
 		// to be checked too.
-		assert!(scan(b"\x1b[?25l\x1b[?2004h\x1b[?25h").is_empty());
+		assert_eq!(
+			scan(b"\x1b[?25l\x1b[?2004h\x1b[?25h"),
+			[] as [(usize, ProtectRequest); 0]
+		);
 	}
 
 	#[test]
 	fn a_sequence_split_across_chunks_is_still_read() {
 		// Output arrives in arbitrary chunks, including between the ESC and the `[`.
 		let mut protect = Protect::default();
-		assert!(protect.feed(b"label\x1b").is_empty());
-		assert!(protect.feed(b"[1").is_empty());
+		assert_eq!(
+			protect.feed(b"label\x1b"),
+			[] as [(usize, ProtectRequest); 0]
+		);
+		assert_eq!(protect.feed(b"[1"), [] as [(usize, ProtectRequest); 0]);
 		// The offset counts from the start of the chunk that completed the sequence.
 		assert_eq!(
 			protect.feed(b"\"qmore"),
@@ -559,7 +583,7 @@ mod tests {
 		));
 		params.extend_from_slice(b"\"q");
 		let mut protect = Protect::default();
-		assert!(protect.feed(&params).is_empty());
+		assert_eq!(protect.feed(&params), [] as [(usize, ProtectRequest); 0]);
 		assert!(!protect.armed);
 	}
 
@@ -584,8 +608,8 @@ mod tests {
 	fn only_can_and_sub_really_cancel_a_sequence() {
 		// The two bytes the ANSI state machine defines as cancels, and the only two the engine leaves a
 		// sequence for. DEL is not one of them.
-		assert!(scan(b"\x1b[1\x18\"q").is_empty());
-		assert!(scan(b"\x1b[1\x1a\"q").is_empty());
+		assert_eq!(scan(b"\x1b[1\x18\"q"), [] as [(usize, ProtectRequest); 0]);
+		assert_eq!(scan(b"\x1b[1\x1a\"q"), [] as [(usize, ProtectRequest); 0]);
 		assert_eq!(
 			scan(b"\x1b[1\x7f\"q"),
 			vec![(6, ProtectRequest::Protect(true))]
@@ -682,7 +706,13 @@ mod tests {
 
 	#[test]
 	fn a_grid_with_no_cells_yields_no_spans() {
-		assert!(spans(Erase::Display(ProtectExtent::All), 0, 0, 0, 0).is_empty());
-		assert!(spans(Erase::Line(ProtectExtent::ToStart), 0, 0, 5, 0).is_empty());
+		assert_eq!(
+			spans(Erase::Display(ProtectExtent::All), 0, 0, 0, 0),
+			[] as [(usize, std::ops::Range<usize>); 0]
+		);
+		assert_eq!(
+			spans(Erase::Line(ProtectExtent::ToStart), 0, 0, 5, 0),
+			[] as [(usize, std::ops::Range<usize>); 0]
+		);
 	}
 }

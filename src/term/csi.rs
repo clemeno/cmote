@@ -627,7 +627,7 @@ mod tests {
 		let mut params = Params::default();
 		assert!(!params.started());
 		params.push(b'0');
-		assert!(params.bytes().is_empty());
+		assert_eq!(params.bytes(), [] as [u8; 0]);
 		assert!(params.started(), "a zero is still a parameter byte");
 	}
 
@@ -702,7 +702,10 @@ mod tests {
 		// unparseable, so folding the byte into the run turned an accident into a sequence cmote acted
 		// on and the engine had thrown away (§111).
 		assert_eq!(framed(&[b"\x1b[?5W"])[0].1, Some(b'?'));
-		assert!(framed(&[b"\x1b[5?W"]).is_empty());
+		assert_eq!(
+			framed(&[b"\x1b[5?W"]),
+			[] as [(usize, Option<u8>, u8, Option<u16>); 0]
+		);
 		assert!(framed(&[b"\x1b[??W"]).is_empty(), "two markers is not one");
 	}
 
@@ -736,7 +739,10 @@ mod tests {
 	fn a_parameter_after_an_intermediate_abandons_the_sequence() {
 		// `vte`'s CSI-intermediate state goes straight to `CsiIgnore`, so the engine has already
 		// thrown this sequence away; a scanner that read it would be acting alone (§106).
-		assert!(framed(&[b"\x1b[1 2k"]).is_empty());
+		assert_eq!(
+			framed(&[b"\x1b[1 2k"]),
+			[] as [(usize, Option<u8>, u8, Option<u16>); 0]
+		);
 		// The legal order still frames: parameters, then intermediates, then the final byte.
 		assert_eq!(framed(&[b"\x1b[1 k"]).len(), 1);
 	}
@@ -746,7 +752,10 @@ mod tests {
 		let mut bytes = b"\x1b[".to_vec();
 		bytes.extend(std::iter::repeat_n(b'!', MAX_INTERMEDIATES + 1));
 		bytes.push(b'W');
-		assert!(framed(&[&bytes]).is_empty());
+		assert_eq!(
+			framed(&[&bytes]),
+			[] as [(usize, Option<u8>, u8, Option<u16>); 0]
+		);
 	}
 
 	#[test]

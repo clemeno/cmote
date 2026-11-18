@@ -300,7 +300,7 @@ mod tests {
 			vec![0, 2]
 		);
 		// An idle bar is idle, not "everything matches".
-		assert!(row.find("").is_empty());
+		assert_eq!(row.find(""), [] as [SearchMatch; 0]);
 	}
 
 	#[test]
@@ -336,7 +336,7 @@ mod tests {
 		// A grid row is padded to the full width; a query of one space must not match the padding.
 		let mut padded = row(0, "hi        ");
 		padded.trim_end();
-		assert!(padded.find(" ").is_empty());
+		assert_eq!(padded.find(" "), [] as [SearchMatch; 0]);
 		// An interior space is still real text, so it is still findable.
 		let mut interior = row(0, "a b       ");
 		interior.trim_end();
@@ -490,6 +490,6 @@ mod tests {
 		// No query, so no hits, so no washes — and a screen with no history is the ordinary case
 		// that must not underflow the absolute -> row mapping.
 		let search = Search::default();
-		assert!(search.visible(0, 0, 24).is_empty());
+		assert_eq!(search.visible(0, 0, 24), [] as [SearchHighlight; 0]);
 	}
 }

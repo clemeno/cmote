@@ -166,10 +166,10 @@ fn palette(theme: EditorTheme) -> Palette {
 			fg: Color::from_rgb8(0xff, 0xff, 0xff),        // editor.foreground
 			muted: Color::from_rgb8(0x60, 0x6b, 0x74),     // editorLineNumber.foreground
 			selection: Color::from_rgba8(0x00, 0xcc, 0xff, 0.2), // editor.selectionBackground #00CCFF33
-			changed: Color::from_rgb8(0xaa, 0xdd, 0xff),   // editorGutter.modifiedBackground
-			notice: Color::from_rgb8(0xff, 0x66, 0x00),    // errorForeground
-			button_bg: Color::from_rgb8(0x40, 0x4e, 0x58), // editorWidget.background
-			accent: Color::from_rgb8(0x00, 0x66, 0x88),    // the user's teal accent (bracket guide)
+			changed: Color::from_rgb8(0xaa, 0xdd, 0xff),         // editorGutter.modifiedBackground
+			notice: Color::from_rgb8(0xff, 0x66, 0x00),          // errorForeground
+			button_bg: Color::from_rgb8(0x40, 0x4e, 0x58),       // editorWidget.background
+			accent: Color::from_rgb8(0x00, 0x66, 0x88), // the user's teal accent (bracket guide)
 			match_line: Color::from_rgba8(0x00, 0xcc, 0xff, 0.16), // a faint cyan find-line wash
 		},
 	}

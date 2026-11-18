@@ -962,12 +962,12 @@ mod tests {
 	fn a_fill_with_a_control_character_is_refused() {
 		// The allow-list. A remote must not paint the page with C0, C1 or DEL — and refusing the
 		// whole sequence is safer than filling with a substitute nobody asked for (§12).
-		assert!(scan(b"\x1b[0;1;1;5;5$x").is_empty());
-		assert!(scan(b"\x1b[7;1;1;5;5$x").is_empty());
-		assert!(scan(b"\x1b[27;1;1;5;5$x").is_empty());
-		assert!(scan(b"\x1b[127;1;1;5;5$x").is_empty());
-		assert!(scan(b"\x1b[155;1;1;5;5$x").is_empty());
-		assert!(scan(b"\x1b[300;1;1;5;5$x").is_empty());
+		assert_eq!(scan(b"\x1b[0;1;1;5;5$x"), [] as [(usize, RectRequest); 0]);
+		assert_eq!(scan(b"\x1b[7;1;1;5;5$x"), [] as [(usize, RectRequest); 0]);
+		assert_eq!(scan(b"\x1b[27;1;1;5;5$x"), [] as [(usize, RectRequest); 0]);
+		assert_eq!(scan(b"\x1b[127;1;1;5;5$x"), [] as [(usize, RectRequest); 0]);
+		assert_eq!(scan(b"\x1b[155;1;1;5;5$x"), [] as [(usize, RectRequest); 0]);
+		assert_eq!(scan(b"\x1b[300;1;1;5;5$x"), [] as [(usize, RectRequest); 0]);
 	}
 
 	#[test]
@@ -1149,14 +1149,20 @@ mod tests {
 	fn the_extent_selects_the_shape_the_pair_acts_on() {
 		// DECSACE reports nothing of its own — it stamps the requests after it (§59).
 		let mut rectangles = Rectangles::default();
-		assert!(rectangles.feed(b"\x1b[2*x").is_empty());
+		assert_eq!(
+			rectangles.feed(b"\x1b[2*x"),
+			[] as [(usize, RectRequest); 0]
+		);
 		let requests = rectangles.feed(b"\x1b[1;1;5;5;1$r");
 		let [(_, RectRequest::Attributes { extent, .. })] = requests[..] else {
 			panic!("expected one attribute request");
 		};
 		assert_eq!(extent, RectExtent::Rectangle);
 		// And back: 0 and 1 both mean the stream.
-		assert!(rectangles.feed(b"\x1b[1*x").is_empty());
+		assert_eq!(
+			rectangles.feed(b"\x1b[1*x"),
+			[] as [(usize, RectRequest); 0]
+		);
 		let requests = rectangles.feed(b"\x1b[1;1;5;5;1$r");
 		let [(_, RectRequest::Attributes { extent, .. })] = requests[..] else {
 			panic!("expected one attribute request");
@@ -1167,7 +1173,10 @@ mod tests {
 	#[test]
 	fn an_extent_nobody_defined_leaves_the_mode_alone() {
 		let mut rectangles = Rectangles::default();
-		assert!(rectangles.feed(b"\x1b[2*x\x1b[9*x").is_empty());
+		assert_eq!(
+			rectangles.feed(b"\x1b[2*x\x1b[9*x"),
+			[] as [(usize, RectRequest); 0]
+		);
 		let requests = rectangles.feed(b"\x1b[1;1;5;5;1$r");
 		let [(_, RectRequest::Attributes { extent, .. })] = requests[..] else {
 			panic!("expected one attribute request");
@@ -1180,13 +1189,16 @@ mod tests {
 		// RIS resets everything a terminal holds. DECSTR does not, because DEC's published list for
 		// it does not name DECSACE — inventing a reset is the same guess as inventing a rectangle.
 		let mut rectangles = Rectangles::default();
-		assert!(rectangles.feed(b"\x1b[2*x\x1b[!p").is_empty());
+		assert_eq!(
+			rectangles.feed(b"\x1b[2*x\x1b[!p"),
+			[] as [(usize, RectRequest); 0]
+		);
 		let requests = rectangles.feed(b"\x1b[1;1;5;5;1$r");
 		let [(_, RectRequest::Attributes { extent, .. })] = requests[..] else {
 			panic!("expected one attribute request");
 		};
 		assert_eq!(extent, RectExtent::Rectangle);
-		assert!(rectangles.feed(b"\x1bc").is_empty());
+		assert_eq!(rectangles.feed(b"\x1bc"), [] as [(usize, RectRequest); 0]);
 		let requests = rectangles.feed(b"\x1b[1;1;5;5;1$r");
 		let [(_, RectRequest::Attributes { extent, .. })] = requests[..] else {
 			panic!("expected one attribute request");
@@ -1233,32 +1245,38 @@ mod tests {
 			scan(b"\x1b[32;1;1;1;1$x"),
 			vec![(14, RectRequest::Fill(' ', box_of(1, 1, 1, 1)))]
 		);
-		assert!(scan(b"\x1b[2*x").is_empty());
+		assert_eq!(scan(b"\x1b[2*x"), [] as [(usize, RectRequest); 0]);
 	}
 
 	#[test]
 	fn a_window_operation_is_not_mistaken_for_a_reversal() {
 		// `CSI 18 t` reports the window size and belongs to the engine. Only `$ t` is DECRARA.
-		assert!(scan(b"\x1b[18t\x1b[8;24;80t").is_empty());
+		assert_eq!(
+			scan(b"\x1b[18t\x1b[8;24;80t"),
+			[] as [(usize, RectRequest); 0]
+		);
 	}
 
 	#[test]
 	fn a_request_mode_query_is_not_mistaken_for_one() {
 		// DECRQM is the one `$` sequence the engine DOES answer, in both spellings. Claiming it here
 		// would take an answer away from a program that asked a question.
-		assert!(scan(b"\x1b[4$p\x1b[?69$p").is_empty());
+		assert_eq!(scan(b"\x1b[4$p\x1b[?69$p"), [] as [(usize, RectRequest); 0]);
 	}
 
 	#[test]
 	fn the_intermediate_is_what_makes_the_family() {
 		// Without the `$` these are ordinary sequences the engine handles: `CSI 5 x` is not a fill,
 		// and `CSI 2 z` is nothing at all.
-		assert!(scan(b"\x1b[45;2;1;2;80x\x1b[2;3;5;7z").is_empty());
+		assert_eq!(
+			scan(b"\x1b[45;2;1;2;80x\x1b[2;3;5;7z"),
+			[] as [(usize, RectRequest); 0]
+		);
 	}
 
 	#[test]
 	fn a_private_marker_rules_the_sequence_out() {
-		assert!(scan(b"\x1b[?2;3;5;7$z").is_empty());
+		assert_eq!(scan(b"\x1b[?2;3;5;7$z"), [] as [(usize, RectRequest); 0]);
 	}
 
 	/// A rectangle built from a misread corner erases the wrong cells, so a spelling none of these
@@ -1270,7 +1288,7 @@ mod tests {
 	/// way onto the framer, and following them here would have made this an erase of rows 2 to 5.
 	#[test]
 	fn a_sub_parameter_is_not_one_of_these_sequences() {
-		assert!(scan(b"\x1b[2:3;5;7$z").is_empty());
+		assert_eq!(scan(b"\x1b[2:3;5;7$z"), [] as [(usize, RectRequest); 0]);
 		assert!(scan(b"\x1b[2;3;5;7:1$z").is_empty(), "anywhere in the run");
 		assert!(scan(b"\x1b[1;1;5;5;1:4$r").is_empty(), "or among selectors");
 		// The `;` spelling of the same four corners IS the erase, so this is about the separator.
@@ -1283,8 +1301,11 @@ mod tests {
 	#[test]
 	fn a_sequence_split_across_chunks_is_still_read() {
 		let mut rectangles = Rectangles::default();
-		assert!(rectangles.feed(b"text\x1b").is_empty());
-		assert!(rectangles.feed(b"[2;3;5").is_empty());
+		assert_eq!(
+			rectangles.feed(b"text\x1b"),
+			[] as [(usize, RectRequest); 0]
+		);
+		assert_eq!(rectangles.feed(b"[2;3;5"), [] as [(usize, RectRequest); 0]);
 		// The offset counts from the start of the chunk that completed the sequence.
 		assert_eq!(
 			rectangles.feed(b";7$zmore"),
@@ -1342,15 +1363,18 @@ mod tests {
 		// The reverse of what this asserted before §106. The engine runs the line feed where it sits and
 		// keeps reading the rectangle's corners around it, so a scanner that gave up would be describing a
 		// different stream from the one the engine saw.
-		assert!(!scan(b"\x1b[2;3\n;5;7$z").is_empty());
+		assert_ne!(scan(b"\x1b[2;3\n;5;7$z"), [] as [(usize, RectRequest); 0]);
 		// CAN and SUB are the only two bytes that really cancel a sequence in flight.
-		assert!(scan(b"\x1b[2;3\x18;5;7$z").is_empty());
+		assert_eq!(scan(b"\x1b[2;3\x18;5;7$z"), [] as [(usize, RectRequest); 0]);
 	}
 
 	#[test]
 	fn ordinary_output_asks_for_nothing() {
 		// The common case has to cost nothing: no request means `process` never splits its advance.
-		assert!(scan(b"\x1b[31mred\x1b[0m\x1b[2J\x1b[1;1Hhello").is_empty());
+		assert_eq!(
+			scan(b"\x1b[31mred\x1b[0m\x1b[2J\x1b[1;1Hhello"),
+			[] as [(usize, RectRequest); 0]
+		);
 	}
 
 	#[test]
@@ -1523,7 +1547,7 @@ mod tests {
 	fn a_checksum_and_an_extent_are_one_final_byte_apart() {
 		// `* x` selects the attribute extent and reports nothing; `* y` asks a question. Sharing an
 		// intermediate, they are told apart by the final byte alone.
-		assert!(scan(b"\x1b[2*x").is_empty());
+		assert_eq!(scan(b"\x1b[2*x"), [] as [(usize, RectRequest); 0]);
 		assert_eq!(scan(b"\x1b[2*y").len(), 1);
 	}
 
@@ -1531,8 +1555,8 @@ mod tests {
 	fn a_self_test_is_not_mistaken_for_a_checksum() {
 		// `CSI 2;1 y` with no intermediate is DECTST, which orders a terminal to run its power-up
 		// self-test. Claiming it here would answer a question nobody asked with a number.
-		assert!(scan(b"\x1b[2;1y").is_empty());
-		assert!(scan(b"\x1b[1;1;1;1;1;1$y").is_empty());
+		assert_eq!(scan(b"\x1b[2;1y"), [] as [(usize, RectRequest); 0]);
+		assert_eq!(scan(b"\x1b[1;1;1;1;1;1$y"), [] as [(usize, RectRequest); 0]);
 	}
 
 	/// SL and SR, and the direction each of them names (§100).

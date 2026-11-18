@@ -226,8 +226,8 @@ mod tests {
 			app.forwards[0].status,
 			crate::forward::ForwardStatus::Starting
 		);
-		assert!(forward_form(&app).listen.is_empty());
-		assert!(forward_form(&app).to.is_empty());
+		assert_eq!(forward_form(&app).listen, "");
+		assert_eq!(forward_form(&app).to, "");
 		assert!(forward_form(&app).error.is_none());
 
 		// The worker was asked to start exactly that spec.

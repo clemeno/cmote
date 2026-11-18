@@ -252,10 +252,10 @@ mod tests {
 	#[test]
 	fn only_the_listed_parameters_are_answered() {
 		assert!(scan(b"\x1b[?n").is_empty(), "an omitted parameter is not 6");
-		assert!(scan(b"\x1b[?0n").is_empty());
+		assert_eq!(scan(b"\x1b[?0n"), [] as [(usize, DsrRequest); 0]);
 		assert!(scan(b"\x1b[?5n").is_empty(), "DSR 5 is the ANSI form's own");
 		assert!(scan(b"\x1b[?60n").is_empty(), "not a prefix match");
-		assert!(scan(b"\x1b[?66n").is_empty());
+		assert_eq!(scan(b"\x1b[?66n"), [] as [(usize, DsrRequest); 0]);
 		assert!(scan(b"\x1b[?99n").is_empty(), "nor is 996 matched short");
 		assert!(scan(b"\x1b[?9960n").is_empty(), "nor matched long");
 	}
@@ -307,7 +307,7 @@ mod tests {
 	/// it here as well would put two replies on the wire for one question.
 	#[test]
 	fn the_private_marker_is_required() {
-		assert!(scan(b"\x1b[6n").is_empty());
+		assert_eq!(scan(b"\x1b[6n"), [] as [(usize, DsrRequest); 0]);
 		assert!(
 			scan(b"\x1b[>6n").is_empty(),
 			"a different marker is a different sequence"
@@ -318,15 +318,15 @@ mod tests {
 	/// understand — and an unrecognised sequence is left alone rather than half-answered.
 	#[test]
 	fn a_second_parameter_rules_it_out() {
-		assert!(scan(b"\x1b[?6;1n").is_empty());
-		assert!(scan(b"\x1b[?6;n").is_empty());
+		assert_eq!(scan(b"\x1b[?6;1n"), [] as [(usize, DsrRequest); 0]);
+		assert_eq!(scan(b"\x1b[?6;n"), [] as [(usize, DsrRequest); 0]);
 	}
 
 	/// An intermediate byte makes it something else again, so the match tests all three of final byte,
 	/// marker and intermediates — the near-miss rule §56 wrote down.
 	#[test]
 	fn an_intermediate_byte_rules_it_out() {
-		assert!(scan(b"\x1b[?6 n").is_empty());
+		assert_eq!(scan(b"\x1b[?6 n"), [] as [(usize, DsrRequest); 0]);
 	}
 
 	/// Output arrives in chunks of whatever size the pty hands over, so the state machine has to carry
@@ -334,9 +334,9 @@ mod tests {
 	#[test]
 	fn a_sequence_split_across_chunks_is_still_found() {
 		let mut dsr = Dsr::default();
-		assert!(dsr.feed(b"\x1b").is_empty());
-		assert!(dsr.feed(b"[?").is_empty());
-		assert!(dsr.feed(b"6").is_empty());
+		assert_eq!(dsr.feed(b"\x1b"), [] as [(usize, DsrRequest); 0]);
+		assert_eq!(dsr.feed(b"[?"), [] as [(usize, DsrRequest); 0]);
+		assert_eq!(dsr.feed(b"6"), [] as [(usize, DsrRequest); 0]);
 		// The offset is into THIS chunk, which is where the interruption advance uses it.
 		assert_eq!(dsr.feed(b"n"), vec![(1, DsrRequest::CursorPosition)]);
 	}
@@ -348,10 +348,10 @@ mod tests {
 		// This asserted the opposite until §106. The engine runs a mid-sequence control byte where it sits
 		// and carries on with the sequence around it, so giving up here would leave cmote and the engine
 		// disagreeing about what the stream sent — which is how three defects reached a release.
-		assert!(!scan(b"\x1b[?6\x07n").is_empty());
+		assert_ne!(scan(b"\x1b[?6\x07n"), [] as [(usize, DsrRequest); 0]);
 		// The converse, so "keep reading" cannot become "keep reading for ever": CAN and SUB are the two
 		// bytes that really do cancel a sequence, here and in the engine.
-		assert!(scan(b"\x1b[?6\x18n").is_empty());
+		assert_eq!(scan(b"\x1b[?6\x18n"), [] as [(usize, DsrRequest); 0]);
 	}
 
 	/// A hostile stream must not be able to make the scanner buffer without bound — and the two bounds
@@ -362,22 +362,22 @@ mod tests {
 		let mut many = b"\x1b[?".to_vec();
 		many.extend(std::iter::repeat_n(b';', super::super::csi::MAX_PARAMS + 1));
 		many.push(b'n');
-		assert!(scan(&many).is_empty());
+		assert_eq!(scan(&many), [] as [(usize, DsrRequest); 0]);
 
 		// A runaway DIGIT run is clamped and the sequence lives, because the engine saturates rather
 		// than giving up. It is simply not one of the four `Ps` cmote answers.
 		let mut digits = b"\x1b[?".to_vec();
 		digits.extend(std::iter::repeat_n(b'6', 500));
 		digits.push(b'n');
-		assert!(scan(&digits).is_empty());
+		assert_eq!(scan(&digits), [] as [(usize, DsrRequest); 0]);
 	}
 
 	/// An empty second parameter is still a second parameter, so `CSI ? 6 ; n` is not a DSR cmote
 	/// answers — the distinction `param_count` exists to keep (§111).
 	#[test]
 	fn a_trailing_separator_is_a_second_parameter() {
-		assert!(scan(b"\x1b[?6;n").is_empty());
-		assert!(scan(b"\x1b[?6;1n").is_empty());
+		assert_eq!(scan(b"\x1b[?6;n"), [] as [(usize, DsrRequest); 0]);
+		assert_eq!(scan(b"\x1b[?6;1n"), [] as [(usize, DsrRequest); 0]);
 		assert_eq!(scan(b"\x1b[?6n").len(), 1, "one parameter, and it is ours");
 	}
 
