@@ -8351,7 +8351,7 @@ mod tests {
 	#[cfg(windows)]
 	#[tokio::test]
 	async fn a_real_local_shell_answers_ctrl_d_by_leaving() {
-		// The shell prints for a while as its profile runs; the press goes in once it has been quiet
+		// The shell prints for a while as it starts (banner, PSReadLine); the press goes in once it has been quiet
 		// for this long AND has printed something, which together are this test's definition of "at a
 		// prompt".
 		//
@@ -8362,7 +8362,7 @@ mod tests {
 		// cores beside it, and the whole failure was one missing precondition.
 		const SETTLED: std::time::Duration = std::time::Duration::from_millis(2500);
 
-		let Some(shell) = crate::local::shells::catalogue()
+		let Some(mut shell) = crate::local::shells::catalogue()
 			.iter()
 			.find(|shell| !shell.kind.quits_on_eof())
 			.cloned()
@@ -8370,6 +8370,17 @@ mod tests {
 			eprintln!("skipped: this machine offers no shell that ignores EOF");
 			return;
 		};
+		// Without the user's profile. One that binds Ctrl+D to PSReadLine's `DeleteCharOrExit` makes the
+		// shell leave by itself, with no `^D` echoed, so this test failed on `typed` on that machine alone.
+		// §104 was measured against the stock shell, and that is the one under test.
+		shell.args.push(
+			match shell.kind {
+				// `/d` skips cmd's AutoRun commands, its nearest thing to a profile.
+				crate::local::shells::ShellKind::Cmd => "/d",
+				_ => "-NoProfile",
+			}
+			.into(),
+		);
 		let (mut tab, mut commands) = app_with_terminal(256);
 		tab.set_local(Some(shell.kind));
 		tab.set_endpoint(shell.endpoint());
@@ -8418,7 +8429,7 @@ mod tests {
 						if !heard || typed { continue }
 						// Pressed on EVERY settle, not once. Quiet is the only prompt signal available
 						// here, and it is not a reliable one: on a loaded machine a gap in the
-						// profile's own output looks exactly like a prompt, so a lone press can land
+						// start-up output looks exactly like a prompt, so a lone press can land
 						// before the shell reads input and simply be lost — which is what made this
 						// test fail 17 times out of 17 beside eight busy cores. Re-pressing costs
 						// nothing, because an unanswered Ctrl+D is precisely the case §104 is built to
