@@ -264,6 +264,7 @@ cmote/
     │   ├── grid.rs        the terminal screen as ONE custom widget: cell-exact quads + text, drawn braille and box corners, mouse reports, search-match washes (§11, §39)
     │   ├── home.rs        the home screen: the filter box, the saved-target list, select / open / rename / delete, theme-following colours (§14, §49)
     │   ├── menu.rs        shared right-click menu chrome: panel / items / separator / dismiss layer (§10, §19, §52)
+    │   ├── minimap.rs     the whole scrollback shrunk into a column beside the terminal's scrollbar: blocks never glyphs, the slider, press to jump (§180)
     │   ├── preview.rs     the picture tab: a toolbar naming what the bytes turned out to be, the image on its ground (iced's own zoom/pan viewer), the refusal card (§53)
     │   ├── selection.rs   stream text selection over the grid, in absolute document lines; word / line expansion for a double or triple click; text extraction, unwrapping across a wrap (§10, §40, §42)
     │   ├── snackbar.rs    the copy-confirmation toast, bottom-centre, self-dismissing (§10)
@@ -21488,3 +21489,122 @@ Left as it was: when the timer does give up, dropping `client::connect` detaches
 rather than stopping it, so a key exchange that completes late can still raise a Challenge for a
 session already reported as failed. The old `timeout` did the same, and with the clock now paused
 during the dialog, a timeout can no longer fire under an open one.
+
+## §180 — A minimap beside the scrollbar: the whole history at a glance, a press from anywhere in it
+
+The scrollbar (§23, §116) says where the view is in 10 000 lines of history and nothing about what is
+there. Asked for: VS Code's minimap, joined to the terminal's vertical scroll, to preview the history
+and jump anywhere in it, **without rendering the characters**. So it is VS Code's minimap with
+`renderCharacters` off: the lines as blocks of their own colours, a slider over the lines on screen,
+and a press anywhere on it scrolls the grid there.
+
+### A column the grid gives up (`ui/terminal.rs`, `ui/minimap.rs`)
+
+The map is a 64-pixel column (`minimap::WIDTH`) left of the scrollbar's gutter, as tall as the
+scrollbar's track, so the two run side by side. `grid_size` takes the column off the width before it
+counts columns, and `window_size` adds it back, so the remote is told a terminal about nine columns
+narrower and no cell is ever drawn under the map. An overlay over the right-hand cells was the
+alternative, and it hides output.
+
+**The width is reserved with history or without.** A map that took its column only once history
+existed would change the column count whenever the alternate screen came or went, and every
+full-screen program would be resized as it started. So the column stays, and with no history (a fresh
+session, or `vim`) it is simply empty — nothing drawn, nothing claimed, a press there the program's,
+the scrollbar's own rule.
+
+**The find bar moved left by the column.** It is placed from the grid's top-right corner (§35), and
+unmoved it covered the top of the map — the oldest history, exactly what a search is about. It now
+covers the cells it always covered.
+
+### Two scales, VS Code's "fit"
+
+While the whole document fits at two pixels a line (`LINE`), that is the scale: the map is drawn from
+the top and the slider is the screen's height at that scale. Once it does not fit, the scale shrinks
+until the whole document does, and the map paints an even sample of it, one line every two pixels.
+VS Code's default instead keeps two pixels a line and scrolls the map itself; on a deep history that
+puts most lines a drag away rather than a press, which was the request's point. "A press" is within a
+few lines rather than exact: at 24 rows a full history is about 29 lines a pixel. The sample is the
+first line of each stretch a painted row stands for (`ponytail:` in `painted_lines`: a lone error line
+can fall between two rows), and the rows COVER the document, the last one partial — the first cut
+rounded down and left the newest 24 lines, the latest screenful, off the map.
+
+**The slider is painted at the bar's floor.** Squeezed, the exact slider is the screen's share of the
+column, and 24 rows of a full history came out at 0.83 px and 15 % opacity: nothing showed where the
+view was. `painted_slider` floors the PAINT at `scrollbar::MIN_THUMB`, centred on the exact slider and
+held inside the column, the same floor the bar has for the same reason (§23). The pointer still reads
+the exact one: on a slider thinner than a pixel every press lands off it and centres the view, which is
+what a press on so small a mark means anyway.
+
+Each cell's ink is one pixel wide, VS Code's own scale, so the map shows a line's first 60 columns and
+cuts the rest, as VS Code cuts at its edge.
+
+### Reading the history every frame (`term/screen.rs`)
+
+`Screen::line_ink` is a reader for the map alone: for one document line it returns the runs of visible
+cells sharing a foreground (`Ink`), reading only the columns the map draws. `line_cell` in a loop
+would have built a whole `Cell` per cell, its text in a fresh `String`. A cell is ink when the grid
+draws something there: not a space and not a control — the engine leaves a tab's `\t` in the cell it
+started from and the grid draws it blank (§117) — or a wide character's spacer, which holds a space but
+is covered by its glyph, so CJK text is one block and not a dashed line. HIDDEN cells (SGR 8) are not
+ink: a concealed password must not show its shape either. It never reads past the grid's own width:
+the map asks for 60 columns, and a narrow window or split region has fewer. `ponytail:` a space that
+shows only by its background — an inverse space, a tmux status line — is a block on the grid and none
+on the map.
+
+Measured, not guessed: a full 10 000-line history at 230 columns, 60 rows, painted 432 lines and 4 752
+quads a frame, read in **1.4 ms in a debug build** — the upper bound; the release build is faster.
+No cache, then.
+
+### The pointer (`ui/grid.rs`)
+
+`map_drag` is `scroll_drag`'s gesture on the map's geometry: a press on the slider holds it where it
+was caught, a press anywhere else on the map jumps the view to centre there, and the drag follows the
+pointer until the release, wherever it strays. It runs after the scrollbar and before both the
+selection and the mouse report, for the bar's reason — the column is cmote's, with no cell under it.
+The grip rule the two share is now one function, `grip`. The map wears no hand and sends no
+`ScrollbarGrabbed`: those are the bar's (§119), and its own `map_grip` keeps a drag of the map from
+brightening the bar.
+
+### Tests, and the probe on each line
+
+- `ink_runs_split_at_a_blank_and_at_a_colour_change`, against the adjacency test removed from the
+  coalescing arm (`ab cd` came back as one run of 4).
+- `ink_is_read_only_as_far_as_it_is_asked`, against `.min` turned into `.max` (a third run past column
+  4), and against the cap at the grid's width removed (an index out of bounds, asking 60 of 10).
+- `a_hidden_cell_and_a_missing_line_have_no_ink`, against the HIDDEN check removed (a run of 6).
+- `a_tab_has_no_ink`, against the control test removed (`a` and the tab as one run of 2).
+- `a_wide_character_is_one_block_with_its_spacer`, against the spacer clause removed.
+- `a_short_history_is_drawn_line_for_line_from_the_top`, against the scale's `.min(LINE)` removed (the
+  top row's line drawn at 193 rather than 146).
+- `a_deep_history_is_squeezed_until_all_of_it_fits`, against a row's line computed at `LINE` instead of
+  the scale (the last row showing line 172 of 5 024), and against `cells_covering` turned back into
+  `cells` (one row short of covering the column).
+- `a_top_most_of_the_way_to_the_next_line_reads_as_that_line`, against `offset` truncating (41, not
+  40). `offset_reads_the_slider_back_at_both_scales` cannot catch that: `slider` puts every top on or
+  just above a line boundary, so it is a round trip and not a rounding test.
+- `a_drag_past_either_end_stops_at_that_end`, against `offset`'s clamp removed (12 269 for a history of
+  5 000).
+- `a_squeezed_slider_is_painted_at_the_bars_floor_and_inside_the_map`, against the floor removed, and
+  against the clamp into the column removed.
+- `the_column_takes_the_grids_freed_width_and_no_cell`, with `grid_fits_area_minus_bar_and_padding_rounding_down`
+  and `window_size_fits_the_requested_grid`, against `grid_size`'s subtraction removed.
+- `a_press_off_the_thumb_catches_its_middle`, against each of `grip`'s two bounds in turn.
+
+Two of these were added by the review (`/pr-review-toolkit:review-pr`'s test analyser), which showed
+that the obvious probe left `a_deep_history_…` and `offset_reads_…` green; the round trip and the
+"in order" checks were true of a broken map too.
+
+Untested: `map_drag` and `draw` themselves, which need a widget tree and a renderer; they are event
+plumbing over the tested geometry, the scrollbar's own split. The find bar's new inset is layout.
+
+### What it does not do
+
+- **No toggle.** The column is always there; a setting can follow if nine columns are missed.
+- **No marks on the map.** VS Code also paints find matches and selections on it; the prompt ticks
+  (§34) and find hits (§39) could follow the same way.
+- **No hover feedback on the slider**, which the bar has (§125).
+- **On the alternate screen it is empty**, so a full-screen program loses nine columns to an empty map.
+  And a program using pixel mouse reports (§150) hears a press there at a pixel past the width it was
+  told, as it already could over the scrollbar's gutter, by more now.
+- **A window under about 83 px wide** has its one clamped column under the map. No window gets there
+  but by force, and the regions' own floor (§48) is far above it.

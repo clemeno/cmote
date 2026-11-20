@@ -36,9 +36,9 @@ use crate::term::screen::{
 	Cell, Color as CellColor, CursorShape, Link, MouseMode, Screen, UnderlineStyle,
 };
 use crate::term::search::SearchHighlight;
-use crate::ui::scrollbar;
 use crate::ui::selection::{ScreenSpot, Selection};
 use crate::ui::terminal::{CELL_HEIGHT, CELL_WIDTH, FONT_SIZE, GRID_PADDING, cell_under};
+use crate::ui::{minimap, scrollbar};
 use iced::advanced::Renderer as _;
 use iced::advanced::image::{Image as RasterImage, Renderer as _};
 use iced::advanced::layout::{self, Layout};
@@ -248,7 +248,7 @@ pub fn grid<'a>(
 /// What the widget remembers between events: the modifiers (they arrive on their own
 /// event, not on the mouse ones), which button the remote program believes is down, the
 /// last cell a move was reported for, so dragging inside one cell stays quiet, and the
-/// scrollbar grip while the bar is being dragged.
+/// scrollbar's grip while the bar is being dragged — and the minimap's while it is (§180).
 #[derive(Debug, Default)]
 struct GridState {
 	modifiers: Modifiers,
@@ -262,6 +262,10 @@ struct GridState {
 	/// the pointer's own y and treating it as the thumb's top would snap the thumb's top to the pointer
 	/// the instant it moved, jumping the view by up to a thumb's height before the drag even began.
 	scroll_grip: Option<f32>,
+	/// The same grip for the minimap's slider (§180): where inside it the pointer caught it, `Some`
+	/// for exactly as long as the button is down on the map. A field of its own rather than the bar's,
+	/// because a drag of the map must not close the bar's hand or brighten its thumb.
+	map_grip: Option<f32>,
 	/// Whether this grid last believed the pointer was on its scrollbar (§119), so the enter and the
 	/// exit are raised on the CHANGE and not on every mouse move.
 	///
@@ -399,11 +403,7 @@ impl Grid<'_> {
 				// view JUMPS there, and the grip becomes the thumb's middle so the thumb centres under
 				// the pointer and the drag carries on from it — which is what makes a click on the
 				// track and a drag from it the same gesture rather than two.
-				let grip = if position.y >= thumb.y && position.y < thumb.y + thumb.height {
-					position.y - thumb.y
-				} else {
-					thumb.height / 2.0
-				};
+				let grip = grip(thumb, position.y);
 				state.scroll_grip = Some(grip);
 				// The hand closes for the whole drag (§119, §51), before the offset goes out — so a
 				// frame that paints the move already has the closed hand on it.
@@ -451,6 +451,74 @@ impl Grid<'_> {
 			}
 			_ => false,
 		}
+	}
+
+	/// Drive the view from the minimap (§180), returning whether the event was the map's — the
+	/// scrollbar's own gesture (`scroll_drag`) on the map's geometry: a press on the slider holds it where
+	/// it was caught, a press anywhere else on the map jumps the view there, and the drag follows the
+	/// pointer wherever it strays until the release.
+	///
+	/// Claimed before the selection and the mouse report for the scrollbar's reason: the column is
+	/// cmote's own, with no cell under it. And inert with no history for the same reason too, which is
+	/// what leaves a press there to a full-screen program on the alternate screen.
+	///
+	/// No hand cursor and no `ScrollbarGrabbed`: those are the bar's (§119), and the map is a place to
+	/// press rather than a handle to pick up.
+	fn map_drag(
+		&self,
+		state: &mut GridState,
+		pointer: &mouse::Event,
+		bounds: Rectangle,
+		cursor: mouse::Cursor,
+		shell: &mut Shell<'_, Message>,
+	) -> bool {
+		let (rows, _) = self.screen.size();
+		let history = self.screen.history_size();
+		let column = minimap::column(bounds, rows);
+		let top = match pointer {
+			mouse::Event::ButtonPressed(mouse::Button::Left) => {
+				let Some(position) = cursor.position() else {
+					return false;
+				};
+				if history == 0 || !column.contains(position) {
+					return false;
+				}
+				let slider = minimap::slider(column, rows, history, self.screen.display_offset());
+				let grip = grip(slider, position.y);
+				state.map_grip = Some(grip);
+				position.y - grip
+			}
+			mouse::Event::CursorMoved { .. } => {
+				let (Some(grip), Some(position)) = (state.map_grip, cursor.position()) else {
+					return false;
+				};
+				position.y - grip
+			}
+			mouse::Event::ButtonReleased(mouse::Button::Left) => {
+				if state.map_grip.take().is_none() {
+					return false;
+				}
+				shell.capture_event();
+				return true;
+			}
+			_ => return false,
+		};
+		shell.publish(Message::TerminalScrollTo(minimap::offset(
+			column, rows, history, top,
+		)));
+		shell.capture_event();
+		true
+	}
+}
+
+/// Where inside `thumb` a press at `y` catches it (§116): the point pressed when it is on the thumb,
+/// and its middle when it is not — so a press off the thumb centres it under the pointer and the drag
+/// carries on from there. The scrollbar's thumb and the minimap's slider (§180) are caught the same way.
+fn grip(thumb: Rectangle, y: f32) -> f32 {
+	if y >= thumb.y && y < thumb.y + thumb.height {
+		y - thumb.y
+	} else {
+		thumb.height / 2.0
 	}
 }
 
@@ -500,7 +568,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		// no quad of its own. Under DECSCNM the page background is the FOREGROUND colour (§149), so
 		// this is where the whole-screen swap is actually painted — the per-cell swap below only has to
 		// agree with it.
-		let (_, backdrop) = page_colors(self.screen.reverse_video());
+		let (foreground, backdrop) = page_colors(self.screen.reverse_video());
 		renderer.fill_quad(fill(bounds), Background::Color(backdrop));
 
 		let (rows, cols) = self.screen.size();
@@ -617,7 +685,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		});
 
 		// The scroll indicator on top of everything (§23): a thin thumb in the right padding
-		// gutter while the viewport is scrolled back, and nothing at the live bottom. Draggable
+		// gutter whenever there is history, the live bottom included since §116. Draggable
 		// since §116, so it brightens under the pointer and brighter still while it is held
 		// (§125) — the same three opacities a pane's bar wears, from the same function. Drawn
 		// outside the clip above: it lives in the padding, not among the cells.
@@ -640,6 +708,15 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 				))),
 			);
 		}
+
+		// The minimap (§180), in the column `grid_size` kept free of cells, beside the bar it scrolls
+		// with. Outside the clip for the bar's reason: it is not among the cells.
+		minimap::draw(
+			renderer,
+			self.screen,
+			minimap::column(bounds, rows),
+			foreground,
+		);
 
 		// The prompt ticks (§34): one mark in the left padding gutter for every shell prompt on
 		// screen. Like the scroll indicator, they are drawn last and in the padding, so they sit
@@ -755,6 +832,10 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		// is history to move through, so this is inert on the alternate screen and inert in a session
 		// with no scrollback yet.
 		if self.scroll_drag(state, pointer, layout.bounds(), cursor, shell) {
+			return;
+		}
+		// The minimap beside it (§180), for the same reasons and with the same inertness.
+		if self.map_drag(state, pointer, layout.bounds(), cursor, shell) {
 			return;
 		}
 
@@ -1467,8 +1548,9 @@ fn scrollbar_thumb(bounds: Rectangle, rows: u16, history: u16, offset: u16) -> O
 
 /// How tall the whole document is in lines — the visible screen plus everything retained above it.
 /// One function because the thumb's height, its position and the inverse below must all divide by the
-/// same number or the bar and the pointer disagree.
-fn document_lines(rows: u16, history: u16) -> f32 {
+/// same number or the bar and the pointer disagree — and the minimap's scale divides by it too (§180),
+/// so the map and the bar cannot disagree about how long the document is.
+pub(super) fn document_lines(rows: u16, history: u16) -> f32 {
 	f32::from(rows) + f32::from(history)
 }
 
@@ -1970,8 +2052,10 @@ fn lerp(from: Color, to: Color, t: f32) -> Color {
 }
 
 /// Map a cell color to an iced color. `Default` becomes the caller's default (different
-/// for fg and bg); indexed colors go through the shared xterm-256 palette.
-fn to_iced_color(color: CellColor, default: Color) -> Color {
+/// for fg and bg); indexed colors go through the shared xterm-256 palette. The minimap's ink comes
+/// through here too (§180), so a cell's foreground resolves to the same RGB on the map as on the grid
+/// — before the faint fade and the inverse and DECSCNM swaps, which the map does not apply.
+pub(super) fn to_iced_color(color: CellColor, default: Color) -> Color {
 	match color {
 		CellColor::Default => default,
 		CellColor::Indexed(index) => rgb(palette::xterm_256(index)),
@@ -2639,8 +2723,8 @@ mod tests {
 	fn the_grab_zone_is_the_whole_gutter_and_contains_the_painted_thumb() {
 		// The paint is 4px so it reads as an indicator; the press target is the 6px gutter, because a
 		// 4px target is one you miss (§116). The zone must contain the thumb — otherwise there are
-		// pixels that look grabbable and are not — and must not reach the first cell, which begins one
-		// GRID_PADDING in from the left and ends one GRID_PADDING short of the right edge.
+		// pixels that look grabbable and are not — and must not reach the minimap, whose column ends
+		// one GRID_PADDING short of the right edge (§180).
 		let bounds = Rectangle {
 			x: 17.0,
 			y: 9.0,
@@ -2654,7 +2738,7 @@ mod tests {
 			thumb.x + thumb.width <= track.x + track.width,
 			"and ends right of it"
 		);
-		// The right edge of the text area, which the zone must not cross back over.
+		// The minimap's right edge (§180), which the zone must not cross back over.
 		assert!((track.x - (bounds.x + bounds.width - GRID_PADDING)).abs() < 0.01);
 		// Vertically the zone is the text rows, matching the span the thumb travels.
 		assert!(track.y >= bounds.y + GRID_PADDING - 0.01);
@@ -2913,6 +2997,28 @@ mod tests {
 			scrollbar::Touch::Dragged,
 			"the pointer left the lane; the bar is still being pulled"
 		);
+	}
+
+	/// A press on a thumb holds it where it was caught, and a press off it catches its middle (§116),
+	/// for the scrollbar's thumb and the minimap's slider alike (§180).
+	#[test]
+	fn a_press_off_the_thumb_catches_its_middle() {
+		let thumb = Rectangle {
+			x: 0.0,
+			y: 100.0,
+			width: 4.0,
+			height: 40.0,
+		};
+		assert!((grip(thumb, 110.0) - 10.0).abs() < f32::EPSILON, "on it");
+		assert!(
+			(grip(thumb, 100.0) - 0.0).abs() < f32::EPSILON,
+			"its top edge"
+		);
+		assert!(
+			(grip(thumb, 140.0) - 20.0).abs() < f32::EPSILON,
+			"just below"
+		);
+		assert!((grip(thumb, 30.0) - 20.0).abs() < f32::EPSILON, "above");
 	}
 
 	/// The gutter is cmote's furniture, so the bar's hand beats a remote's OSC 22 shape (§77, §125).

@@ -392,7 +392,8 @@ pub fn view<'a>(
 
 	// The terminal now has the whole area under the bar to itself — full width, alone in its
 	// section (§18). The folder tree used to share this row; it moved down beside the files
-	// pane, so the grid is always `Fill` here and reserves width for nothing.
+	// pane, so the grid is always `Fill` here and reserves width for nothing — the one width it gives
+	// up, the minimap's column (§180), is inside its own bounds, taken off by `grid_size`.
 	let body: Element<'a, Message> = interactive_grid.into();
 
 	// Whether the folder tree is actually on screen: it lives inside the browser strip now, so
@@ -884,14 +885,16 @@ fn search_bar(search: &crate::term::search::Search) -> Element<'_, Message> {
 		});
 
 	// Placed by a full-size transparent container, the same trick the context menu uses — aligned
-	// right, and pushed down past the status bar so it sits inside the grid's own area.
+	// right, and pushed down past the status bar so it sits inside the grid's own area. Left of the
+	// minimap's column (§180): searching is exactly when the top of the map, the oldest history, is
+	// wanted in view, and the bar then covers the cells it always covered.
 	container(card)
 		.width(Length::Fill)
 		.height(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Right)
 		.padding(iced::Padding {
 			top: STATUS_BAR_HEIGHT + SEARCH_BAR_INSET,
-			right: SEARCH_BAR_INSET,
+			right: SEARCH_BAR_INSET + crate::ui::minimap::WIDTH,
 			bottom: 0.0,
 			left: 0.0,
 		})
@@ -1319,13 +1322,14 @@ fn grid_interaction(shape: pointer::Shape) -> Option<iced::mouse::Interaction> {
 /// The (rows, cols) grid that fits `area` logical pixels, laid out exactly as
 /// `view` draws it: the status bar takes `STATUS_BAR_HEIGHT` off the top and the browser strip
 /// and its splitter take `reserved_height` off the height (§19) — zero when the pane is hidden
-/// — then the grid's own padding is subtracted on both axes. The terminal is full width now
-/// (§18): the folder tree moved down into the browser strip, so nothing reserves horizontal room
-/// any more. Rounds down so the last cell is never clipped, and clamps to at least 1×1 so the
-/// emulator always has a valid size. The app calls this on a window resize — and on a pane
-/// resize — to reflow both the local emulator and the remote pty (§9).
+/// — then the grid's own padding is subtracted on both axes. The folder tree moved down into the
+/// browser strip (§18), so the one horizontal reserve is the minimap's column (§180), the same width
+/// with history or without so the pty is never resized by a screen switch. Rounds down so the last
+/// cell is never clipped, and clamps to at least 1×1 so the emulator always has a valid size. The app
+/// calls this on a window resize — and on a pane resize — to reflow both the local emulator and the
+/// remote pty (§9).
 pub fn grid_size(area: Size, reserved_height: f32) -> (u16, u16) {
-	let usable_width = area.width - 2.0 * GRID_PADDING;
+	let usable_width = area.width - 2.0 * GRID_PADDING - crate::ui::minimap::WIDTH;
 	let usable_height = area.height - STATUS_BAR_HEIGHT - reserved_height - 2.0 * GRID_PADDING;
 	let cols = super::cell_index(usable_width, CELL_WIDTH).max(1);
 	let rows = super::cell_index(usable_height, CELL_HEIGHT).max(1);
@@ -1334,13 +1338,15 @@ pub fn grid_size(area: Size, reserved_height: f32) -> (u16, u16) {
 
 /// The window (logical) size whose content fits exactly a `cols`×`rows` grid — the
 /// inverse of `grid_size`, built from the same metrics so the two never drift. Adds the
-/// grid padding on both axes, the status-bar height and the space the browser strip reserves
-/// at the bottom (§19), plus half a cell of slack so float rounding in `grid_size` cannot come
-/// back a row/column short. The terminal spans the full width now (§18), so only the height
-/// carries a reserve. `run` uses it to open the window sized for a chosen terminal size *and*
-/// the strip under it (§10, §11).
+/// grid padding on both axes, the minimap's column (§180), the status-bar height and the space the
+/// browser strip reserves at the bottom (§19), plus half a cell of slack so float rounding in
+/// `grid_size` cannot come back a row/column short. `run` uses it to open the window sized for a
+/// chosen terminal size *and* the strip under it (§10, §11).
 pub fn window_size(cols: u16, rows: u16, reserved_height: f32) -> Size {
-	let width = f32::from(cols) * CELL_WIDTH + 2.0 * GRID_PADDING + CELL_WIDTH / 2.0;
+	let width = f32::from(cols) * CELL_WIDTH
+		+ 2.0 * GRID_PADDING
+		+ crate::ui::minimap::WIDTH
+		+ CELL_WIDTH / 2.0;
 	let height = f32::from(rows) * CELL_HEIGHT
 		+ STATUS_BAR_HEIGHT
 		+ reserved_height
@@ -1355,17 +1361,17 @@ mod tests {
 
 	#[test]
 	fn grid_fits_area_minus_bar_and_padding_rounding_down() {
-		// width:  (812 - 12)      / 7.2  = 111.1 -> 111 cols
-		// height: (500 - 34 - 12) / 14.4 = 31.5  -> 31 rows  (34 = status bar)
+		// width:  (812 - 12 - 64) / 7.2  = 102.2 -> 102 cols  (64 = the minimap, §180)
+		// height: (500 - 34 - 12) / 14.4 = 31.5  -> 31 rows   (34 = status bar)
 		let (rows, cols) = grid_size(Size::new(812.0, 500.0), 0.0);
-		assert_eq!((rows, cols), (31, 111));
+		assert_eq!((rows, cols), (31, 102));
 	}
 
 	#[test]
 	fn the_files_pane_takes_its_height_off_the_grid() {
 		// The pane is laid out under the grid, so the rows it costs must come out of the same
 		// arithmetic the reflow uses (§19), or the pty and the view disagree by exactly the
-		// pane's height. It is the only reserve left: the terminal spans the full width (§18).
+		// pane's height. It is the only HEIGHT reserve; the width's one is the minimap's column (§180).
 		let area = Size::new(812.0, 500.0);
 		let (tall, _) = grid_size(area, 0.0);
 		let (short, _) = grid_size(area, 144.0); // 144 / 14.4 = 10 rows exactly

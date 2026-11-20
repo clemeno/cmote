@@ -251,6 +251,18 @@ The small cyan mark in the grid's left padding gutter beside every prompt on scr
 bookmark (OSC 1337 SetMark, §55), never success from failure.
 _Avoid_: reading any exit status into it — that is the **Dot**
 
+**Minimap**:
+The column beside the terminal's scrollbar that shows the whole document shrunk — every line while
+it fits at two pixels a line, an even sample once it does not — as blocks of their own colours,
+never glyphs (§180). A press scrolls the grid to where it lands. Its **slider** is the stretch of it
+the grid is showing.
+_Avoid_: overview, preview — the preview is the picture viewer tab (§53); band, for the slider —
+see **Band**
+
+**Ink**:
+A cell's foreground as drawn — the ink on the paper (the palette's ink slots, §138). The minimap's
+`Ink` is one run of it: consecutive visible cells of one foreground on a line (§180).
+
 **Dot**:
 The command-status light on a tab's chip (§34): amber while a command runs, green when the last one
 exited 0, red when it failed, absent on a tab whose shell announces nothing. The ONLY place an exit

@@ -283,7 +283,12 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
   track to jump — so it is a control and not only an indicator; a press there is captured, so it
   reaches neither the text selection nor a mouse-aware program's reports.
   The alternate screen keeps no history, so scrolling is inert there by design — and with no history
-  there is no thumb, so the bar takes no press away from a full-screen program either. That
+  there is no thumb, so the bar takes no press away from a full-screen program either. Since §180 a
+  **minimap** sits beside the bar, the whole history shrunk to blocks of its own colours, and a press
+  or drag on it scrolls the view there. It is captured exactly as the bar's press is and inert the
+  same way with no history; its column is reserved whether or not there is any, so the pty is about
+  nine columns narrower than the window, on the alternate screen too. Its one reader in the seam is
+  `Screen::line_ink`, which skips HIDDEN cells, so concealed text has no shape on the map. That
   history is **searchable** (§35): Ctrl+Shift+F floats a find bar over the grid, and each hit is
   revealed (centred when off-screen) and turned into an ordinary selection, so Copy takes it
   (`term::search`). **Every hit on the visible screen is washed** in a second highlight colour (§39),
@@ -2872,7 +2877,10 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   It is what makes a triple click take a whole *logical* line and a copy across a wrap re-join its halves
   instead of pasting a newline into the middle of a path. `grid_line(line)` is the shared private helper
   both `line_cell` and `line_wrapped` resolve through, so a cell read and a wrap check cannot disagree
-  about which line is which.
+  about which line is which. **§180 added `line_ink(line, columns)`** through the same helper, the
+  minimap's reader: runs of visible cells of one foreground, read in place without building a `Cell`.
+  Visible means drawn and not `Flags::HIDDEN` — a `\t` the engine leaves in a tab's first cell is
+  blank, as the grid draws it (§117), and a `Flags::WIDE_CHAR_SPACER` counts with its glyph.
 - **`term/keymap.rs`** — printable + layout, Ctrl → C0, Alt-as-meta, named keys including
   **F1–F24** and the **modified named keys** (`modifier_param` computes the xterm parameter,
   `letter_key` / `tilde_key` shape the two key families), **modifyOtherKeys** (`modify_other_key`

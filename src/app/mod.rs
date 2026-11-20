@@ -141,8 +141,9 @@ pub fn run() -> iced::Result {
 		// Open at the size the last run left the window (§31), or — on a first run, or after a
 		// settings file that could not be trusted — wide enough for a full-width 180-column
 		// terminal and tall enough to also show the browser strip under it (§18, §19). The tree
-		// shares that strip rather than sitting beside the grid, so the fallback reserves height
-		// only, and it is derived from the grid metrics so it stays in step with `grid_size`.
+		// shares that strip rather than sitting beside the grid, so the one width the fallback
+		// adds is the minimap's column (§180), and it is derived from the grid metrics so it stays in
+		// step with `grid_size`.
 		.window(iced::window::Settings {
 			size: crate::settings::Settings::load()
 				.window_size()
@@ -5758,9 +5759,9 @@ impl Tab {
 		// Remember the window size on every screen so a dialog (which can appear before a
 		// terminal exists) can be centred and its dragging clamped (§10).
 		self.window_size = size;
-		// The files pane takes its height out of the grid — the terminal is full width now, the
-		// tree sits under it (§18) — so the same call serves a window resize and the pane's own
-		// resize (§19).
+		// The files pane takes its height out of the grid — the tree sits under it rather than
+		// beside it (§18), and the only width taken is the minimap's column (§180) — so the same call
+		// serves a window resize and the pane's own resize (§19).
 		let (rows, cols) = ui::terminal::grid_size(size, self.panes.pane.reserved());
 		// The in-band resize notification, if a program asked for one (§148). It comes back from the
 		// resize itself rather than from the next `process`, because a resize is not a chunk of output

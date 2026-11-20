@@ -233,10 +233,15 @@ changed between releases, with the section number for each line.
   scrolls it (whenever no full-screen program has claimed the wheel), **Shift+PageUp/PageDown**
   page through it and **Shift+Home/End** jump to the top and back to the live bottom; typing (or
   pasting) snaps you back to the prompt so what you send lands where it echoes. New output while
-  you are scrolled up leaves you where you are reading. A thin **scroll indicator** appears at the
-  right edge while you are scrolled up and disappears at the live bottom — its bar shows where you
-  are in the history and how deep it runs. A full-screen program (vim, tmux, less) keeps its own
-  pages, so scrolling there is theirs, not cmote's (§23).
+  you are scrolled up leaves you where you are reading. A thin **scroll indicator** at the right
+  edge, there whenever there is history, shows where you are in it and how deep it runs; drag it,
+  or press its track to jump (§116). A full-screen program (vim, tmux, less) keeps its own pages,
+  so scrolling there is theirs, not cmote's (§23).
+- **A minimap of the history** — beside the scroll indicator, the whole scrollback shrunk into a
+  column: the lines as small blocks in their own colours (no characters), and a slider over the
+  lines on screen. **Press anywhere** on it to jump there, or **drag** the slider. A short history is
+  drawn a line for every two pixels; a long one is squeezed until all of it fits, so a press lands
+  within a few lines of anywhere in it (§180). The column takes about nine columns from the terminal.
 - **Search the scrollback** — **Ctrl+Shift+F** floats a find bar over the grid. Typing searches all
   10 000 lines as you go (case-insensitive) and lands on the **newest** hit, scrolling it into view and
   selecting it, so Copy takes it with no extra step; **↑** / **↓** walk older and newer and wrap at

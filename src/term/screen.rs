@@ -115,6 +115,18 @@ pub struct Cell {
 	hyperlink: Option<Link>,
 }
 
+/// One stretch of ink on a document line (§180): `width` consecutive visible cells from column
+/// `start`, all of the foreground `fg`.
+///
+/// What the minimap paints a line from. It draws blocks and never glyphs, so a block needs where it
+/// starts, how long it is and what colour it is — and nothing else a `Cell` carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ink {
+	pub start: u16,
+	pub width: u16,
+	pub fg: Color,
+}
+
 /// The OSC 8 hyperlink a cell carries: where it points, and the `id` that says which link it is
 /// (§92).
 ///
@@ -573,6 +585,53 @@ impl<'a> Screen<'a> {
 		Some(build_cell(cell))
 	}
 
+	/// The ink on document line `line` (§180), read from its first `columns` columns only: each run of
+	/// visible cells sharing one foreground, left to right. Empty for a line the session does not hold.
+	///
+	/// A reader of its own rather than `line_cell` in a loop, because of who calls it and how often.
+	/// The minimap reads a few hundred lines every frame, and `line_cell` builds a whole `Cell` per
+	/// cell — its text in a fresh `String`, its link copied out. This looks at the engine's cell in
+	/// place and allocates only the runs it returns.
+	///
+	/// A cell is ink when the grid draws something there and it is not HIDDEN (SGR 8), a hidden password
+	/// being no more visible as a block than as a glyph. Something drawn is a character other than a
+	/// space or a control — the engine leaves a tab's `\t` in the cell it started from, and the grid
+	/// draws that blank (§117) — or the second half of a wide character, whose spacer cell holds a space
+	/// but is covered by the glyph, so a CJK line is one block rather than a dashed one.
+	///
+	/// `ponytail:` a space that shows only by its BACKGROUND — an inverse space, a tmux status line's
+	/// coloured bar — is a block on the grid and nothing here; worth reading if the history turns out to
+	/// carry many of them.
+	pub fn line_ink(&self, line: u64, columns: u16) -> Vec<Ink> {
+		let mut runs: Vec<Ink> = Vec::new();
+		let Some(grid_line) = self.grid_line(line) else {
+			return runs;
+		};
+		let row = &self.engine.grid()[grid_line];
+		// Never past the grid's own width, whatever was asked: the map asks for 60 columns, and a
+		// narrower window or split region has fewer.
+		for col in 0..usize::from(columns).min(self.engine.columns()) {
+			let cell = &row[Column(col)];
+			let drawn = cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+				|| (cell.c != ' ' && !cell.c.is_control());
+			if !drawn || cell.flags.contains(Flags::HIDDEN) {
+				continue;
+			}
+			let start = as_dimension(col);
+			let fg = color(cell.fg);
+			match runs.last_mut() {
+				// The same colour, touching the run before: one longer block rather than two.
+				Some(run) if run.fg == fg && run.start + run.width == start => run.width += 1,
+				_ => runs.push(Ink {
+					start,
+					width: 1,
+					fg,
+				}),
+			}
+		}
+		runs
+	}
+
 	/// Whether document line `line` is CONTINUED by the line after it (§42) — one logical line of
 	/// output that ran past the right margin and carried on below, rather than two lines a newline
 	/// separated. The engine records it as a flag on the row's LAST cell, set at the moment output
@@ -969,5 +1028,72 @@ mod tests {
 		assert_eq!(terminal.screen().history_size(), 3);
 		terminal.process(b"\x1b[?1049h");
 		assert_eq!(terminal.screen().history_size(), 0);
+	}
+
+	/// The ink of row 0 after `input`, read through the first `columns` columns (§180).
+	fn ink0(input: &str, columns: u16) -> Vec<Ink> {
+		let mut terminal = Terminal::new(1, 10);
+		terminal.process(input.as_bytes());
+		terminal.screen().line_ink(0, columns)
+	}
+
+	fn ink(start: u16, width: u16, fg: Color) -> Ink {
+		Ink { start, width, fg }
+	}
+
+	#[test]
+	fn ink_runs_split_at_a_blank_and_at_a_colour_change() {
+		// "ab", a space, "cd" in red, then "e" back in the default: the space breaks the first run off,
+		// the colour breaks the second, and touching cells of one colour coalesce.
+		assert_eq!(
+			ink0("ab \x1b[31mcd\x1b[0me", 10),
+			[
+				ink(0, 2, Color::Default),
+				ink(3, 2, Color::Indexed(1)),
+				ink(5, 1, Color::Default),
+			]
+		);
+		// One colour throughout: only the blank splits it, so two runs and not one.
+		assert_eq!(
+			ink0("ab cd", 10),
+			[ink(0, 2, Color::Default), ink(3, 2, Color::Default)]
+		);
+	}
+
+	#[test]
+	fn ink_is_read_only_as_far_as_it_is_asked() {
+		// The minimap draws a fixed number of columns; a cell past them is never read.
+		assert_eq!(
+			ink0("ab \x1b[31mcd\x1b[0me", 4),
+			[ink(0, 2, Color::Default), ink(3, 1, Color::Indexed(1))]
+		);
+		// And never past the grid's own width: the map asks for 60 columns of a 10-column terminal,
+		// which must read ten and not index past the row.
+		assert_eq!(ink0("ab", 60), [ink(0, 2, Color::Default)]);
+	}
+
+	#[test]
+	fn a_tab_has_no_ink() {
+		// The engine keeps a tab's `\t` in the cell it started from and the grid draws it blank, so the
+		// map must too: "a", the tab's blank stretch, then "b" at the next stop.
+		assert_eq!(
+			ink0("a\tb", 10),
+			[ink(0, 1, Color::Default), ink(8, 1, Color::Default)]
+		);
+	}
+
+	#[test]
+	fn a_wide_character_is_one_block_with_its_spacer() {
+		// Two wide characters cover four cells, their spacers included: one block, not two dashes.
+		assert_eq!(ink0("漢字", 10), [ink(0, 4, Color::Default)]);
+	}
+
+	#[test]
+	fn a_hidden_cell_and_a_missing_line_have_no_ink() {
+		// SGR 8 conceals text on the grid, so the minimap must not show its shape either.
+		assert_eq!(ink0("\x1b[8msecret", 10), []);
+		assert_eq!(ink0("x", 10).len(), 1, "the line itself is there");
+		let terminal = Terminal::new(1, 10);
+		assert_eq!(terminal.screen().line_ink(99, 10), []);
 	}
 }
