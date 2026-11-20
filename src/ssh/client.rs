@@ -6,8 +6,9 @@
 //   session_task() — one connection's whole life: connect -> host-key gate (§8)
 //                    -> password auth (§7) -> pty + shell -> byte stream.
 //   Handler        — russh calls `check_server_key` during the handshake; that
-//                    is our TOFU gate. Unknown keys are surfaced to the GUI and
-//                    the user's decision awaited; a changed key is refused.
+//                    is our TOFU gate. An unknown or a changed key is surfaced to
+//                    the GUI and the user's decision awaited (§8, §28), on a
+//                    connect timer that stops while it waits (§179).
 //
 // Why a *spawned* session task instead of running the connect inline: the
 // host-key gate must pause mid-handshake and wait for the user to click
@@ -24,8 +25,8 @@ use anyhow::{Context, Result};
 use russh::Channel;
 use russh::client;
 use russh::keys::PublicKeyOrCertificate;
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::timeout;
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::time::Instant;
 
 use crate::bridge::{ConflictChoice, ConnectParams, HostKeyChoice, SshCommand, SshEvent};
 use crate::secret::Secret;
@@ -41,8 +42,47 @@ use crate::ssh::shell;
 use crate::ssh::upload;
 use crate::term;
 
-/// How long to wait for the TCP connect + SSH handshake before giving up.
+/// How much NETWORK time the TCP connect + SSH handshake may take before giving up. The time a
+/// host-key Challenge is open is not counted (§179): see `within_network_time`.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Await `connect`, giving up with `None` once it has spent `budget` of network time (§179).
+///
+/// A plain `timeout` counted the wrong thing. The handshake stops mid-way on a first-contact or
+/// changed host key and waits for the user (§8, §28), and that wait ran on the same clock as the network:
+/// a user who took more than 30 seconds to compare a fingerprint — the very care the Challenge asks
+/// for — lost the connection under the open dialog. So the clock stops while `challenge_open` reads
+/// true, and the budget left when it opened is what the rest of the handshake gets.
+///
+/// There is no cap while it is open, the same as OpenSSH's `yes/no` question. The server keeps its
+/// own clock (OpenSSH's `LoginGraceTime`, 120 s by default), so a dialog left open past it ends with
+/// the connection gone, reported once the user answers.
+async fn within_network_time<F: Future>(
+	budget: Duration,
+	connect: F,
+	mut challenge_open: watch::Receiver<bool>,
+) -> Option<F::Output> {
+	tokio::pin!(connect);
+	let mut remaining = budget;
+	// Cleared once the sender is gone — the `Handler` dropped, so no Challenge can open again. The
+	// receiver's `changed()` would then return `Err` at once on every turn, and the loop would spin
+	// instead of wait.
+	let mut watching = true;
+	loop {
+		let paused = watching && *challenge_open.borrow_and_update();
+		let started = Instant::now();
+		tokio::select! {
+			output = &mut connect => return Some(output),
+			() = tokio::time::sleep(remaining), if !paused => return None,
+			changed = challenge_open.changed(), if watching => {
+				watching = changed.is_ok();
+				if !paused {
+					remaining = remaining.saturating_sub(started.elapsed());
+				}
+			}
+		}
+	}
+}
 
 /// How many accepted-but-not-yet-opened forward connections may queue between the listeners and
 /// the session loop before a listener awaits (§27). Generous — a burst of tunnel connections is
@@ -493,20 +533,26 @@ async fn connect_and_run(
 	// session, cloned into both.
 	let remote_forwards = forward::remote_table();
 
+	// Whether a host-key Challenge is open: the Handler raises it, the timer below reads it (§179).
+	let (challenge_open, challenge_watched) = watch::channel(false);
+
 	let handler = Handler {
 		host: params.host.clone(),
 		port: params.port,
 		known_hosts: hostkey::known_hosts_path()?,
 		events: events.clone(),
 		decision: Some(decision_rx),
+		challenge_open,
 		remote_forwards: remote_forwards.clone(),
 	};
 
-	// TCP connect + SSH handshake, bounded by a timeout. The handshake runs the
-	// host-key gate (Handler::check_server_key) before returning.
-	let mut session = timeout(
+	// TCP connect + SSH handshake, bounded by a budget of network time. The handshake runs the
+	// host-key gate (Handler::check_server_key) before returning, and the time it waits on the user
+	// is not counted (§179).
+	let mut session = within_network_time(
 		CONNECT_TIMEOUT,
 		client::connect(config, (params.host.as_str(), params.port), handler),
+		challenge_watched,
 	)
 	.await
 	.context("connection timed out")?
@@ -877,6 +923,8 @@ pub(crate) struct Handler {
 	events: mpsc::Sender<SshEvent>,
 	/// Consumed once, in `check_server_key`, to await the user's decision.
 	decision: Option<oneshot::Receiver<HostKeyChoice>>,
+	/// True while the user's host-key decision is awaited, so the connect timer stops counting (§179).
+	challenge_open: watch::Sender<bool>,
 	/// The active remote forwards, shared with the session loop (§27): the server's bound port →
 	/// the local target to dial. Read in `server_channel_open_forwarded_tcpip` when the server
 	/// opens a channel for a connection that arrived on one of those ports.
@@ -1052,18 +1100,122 @@ impl Handler {
 	/// mismatch gates. Consumes the one-shot; a dropped sender — the GUI went away before
 	/// answering — is treated as `Reject`, the safe default. Called at most once per connection
 	/// (a handshake sees either an unknown key or a changed one, never both).
+	///
+	/// The wait is the user's time, not the network's, so the connect timer is paused around it
+	/// (§179). `send_replace` because it cannot fail: with the timer gone there is no one to tell.
 	async fn await_decision(&mut self) -> HostKeyChoice {
-		match self.decision.take() {
+		self.challenge_open.send_replace(true);
+		let choice = match self.decision.take() {
 			Some(rx) => rx.await.unwrap_or(HostKeyChoice::Reject),
 			None => HostKeyChoice::Reject,
-		}
+		};
+		self.challenge_open.send_replace(false);
+		choice
 	}
 }
 
 #[cfg(test)]
 mod tests {
-	use super::{compressed_preferences, user_message};
+	use std::path::PathBuf;
+	use std::time::Duration;
+
+	use tokio::sync::{mpsc, oneshot, watch};
+	use tokio::time::{sleep, timeout};
+
+	use super::{Handler, compressed_preferences, user_message, within_network_time};
+	use crate::bridge::HostKeyChoice;
 	use crate::ssh::auth::AuthRefused;
+	use crate::ssh::forward;
+
+	/// The network budget the two timer tests share, standing in for `CONNECT_TIMEOUT`.
+	const BUDGET: Duration = Duration::from_secs(30);
+
+	/// A handshake as the timer sees it (§179): `before` on the network, a host-key Challenge held
+	/// open for `open` while the user reads the fingerprint, then `after` more on the network.
+	async fn handshake(
+		challenge_open: watch::Sender<bool>,
+		before: Duration,
+		open: Duration,
+		after: Duration,
+	) -> &'static str {
+		sleep(before).await;
+		challenge_open.send_replace(true);
+		sleep(open).await;
+		challenge_open.send_replace(false);
+		sleep(after).await;
+		"connected"
+	}
+
+	/// The time a Challenge is open is the user's, not the network's: 10 s + 15 s of network around
+	/// ten minutes of reading is 25 s against a 30 s budget, and the connection goes through (§179).
+	/// Ten minutes, well past OpenSSH's 120 s `LoginGraceTime`, because there is no cmote cap while
+	/// the Challenge is open — a decision, so a cap added later fails here first.
+	#[tokio::test(start_paused = true)]
+	async fn time_spent_on_an_open_challenge_does_not_count() {
+		let (challenge_open, watched) = watch::channel(false);
+		let connect = handshake(
+			challenge_open,
+			Duration::from_secs(10),
+			Duration::from_secs(600),
+			Duration::from_secs(15),
+		);
+
+		assert_eq!(
+			within_network_time(BUDGET, connect, watched).await,
+			Some("connected")
+		);
+	}
+
+	/// The network time on BOTH sides of the Challenge counts: 10 s before it and 25 s after is 35 s,
+	/// over the budget, so a server that stalls after the accept still times out (§179).
+	#[tokio::test(start_paused = true)]
+	async fn network_time_before_and_after_the_challenge_adds_up() {
+		let (challenge_open, watched) = watch::channel(false);
+		let connect = handshake(
+			challenge_open,
+			Duration::from_secs(10),
+			Duration::from_secs(100),
+			Duration::from_secs(25),
+		);
+
+		assert_eq!(within_network_time(BUDGET, connect, watched).await, None);
+	}
+
+	/// The other half of §179: the `Handler` raises the flag while the user decides, and lowers it
+	/// once they have. Without the raise the timer never pauses; without the lower it never resumes,
+	/// and a server that stalls after the accept is waited on forever. The user here answers only
+	/// once the flag is up, so a missing raise fails on the `timeout` instead of hanging.
+	#[tokio::test(start_paused = true)]
+	async fn the_challenge_flag_is_up_exactly_while_the_user_decides() {
+		let (decide, decision) = oneshot::channel();
+		let (challenge_open, mut watched) = watch::channel(false);
+		let (events, _shown) = mpsc::channel(1);
+		let mut handler = Handler {
+			host: "example.test".to_string(),
+			port: 22,
+			known_hosts: PathBuf::new(),
+			events,
+			decision: Some(decision),
+			challenge_open,
+			remote_forwards: forward::remote_table(),
+		};
+		let user = async {
+			watched
+				.wait_for(|open| *open)
+				.await
+				.expect("the handler is alive");
+			decide.send(HostKeyChoice::Pin).expect("the handler waits");
+		};
+
+		let (choice, ()) = timeout(BUDGET, async {
+			tokio::join!(handler.await_decision(), user)
+		})
+		.await
+		.expect("the flag went up while the user decided");
+
+		assert_eq!(choice, HostKeyChoice::Pin);
+		assert!(!*watched.borrow(), "and came down once they had");
+	}
 
 	/// A refused login is named as one on screen (§178), however much context was added on the way
 	/// up, and every other failure keeps the generic line.

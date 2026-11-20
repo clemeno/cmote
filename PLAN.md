@@ -21434,3 +21434,57 @@ establish the SSH session."`), and `last_failure`'s closed branch removed. A thi
 plain `"authentication failed"` string on the generic line, so the type decides and not the text. The
 call into `last_failure` needs a server that refuses (§13): checked by hand, an empty password against
 a server that wants one.
+
+## §179 — The connect timer stops while the fingerprint is read
+
+The 30-second `CONNECT_TIMEOUT` wrapped `client::connect` whole, and the host-key Challenge (§8) runs
+inside it: `check_server_key` waits there for the user's click. So the clock counted the user's reading
+time as network time. Found the day of §178: comparing a first-contact fingerprint against another
+source took longer than 30 seconds, and the connection was dropped under the open dialog
+(`connection timed out: deadline has elapsed` on stderr). The care the Challenge asks for was what
+got punished.
+
+### How (`ssh/client.rs`)
+
+`within_network_time` replaces the `timeout`. The `Handler` holds a `watch::Sender<bool>`,
+`challenge_open`, raised and lowered inside `await_decision`, around the wait for the click — the one
+place both Challenges (first contact and changed key) wait. The timer reads the other end: while it is
+true no sleep is armed, and when it changes the network time spent so far comes off the budget.
+Network time on both sides of the Challenge adds up, so a server that stalls after the accept still
+times out once its network time before and after the Challenge, together, reaches 30 seconds.
+
+`tokio::time::timeout` cannot pause, which is why it is a `select!` loop and not a wrapper. A watch
+channel rather than an `AtomicBool` because the timer has to WAKE on both edges: when the dialog opens,
+to disarm the sleep that would otherwise fire under it, and when it closes, to arm it again — the
+`connect` future itself only wakes once the key exchange is done. A flag cannot wake anyone.
+
+### Decided with the user
+
+- **No cmote cap while the Challenge is open.** OpenSSH's `yes/no` question has none either. The
+  server keeps its own clock (OpenSSH's `LoginGraceTime`, 120 s by default); a dialog left open past it
+  ends with the connection gone, which russh notices once the handshake resumes, after the click.
+- **tokio's `test-util`, for tests only** (`[dev-dependencies]`). The timer tests are a story of
+  minutes — 10 s of network, ten minutes of reading, then 15 s or 25 s more — and on the paused clock
+  they run in no time and cannot be late on a loaded machine, the failure §111 is about. Edition 2024's
+  resolver keeps a dev-dependency's features out of the shipped build, and `test-util` adds no crate.
+
+### Tests, and the probe on each line
+
+- `time_spent_on_an_open_challenge_does_not_count`, against the sleep's `if !paused` removed
+  (`left: None`) and, separately, the `if !paused` around the subtraction removed — the open time is
+  then taken off the budget too. Its ten minutes of reading also pin the no-cap decision.
+- `network_time_before_and_after_the_challenge_adds_up`, against the `saturating_sub` disabled, so the
+  budget never goes down and starts over at every change (`left: Some("connected")`).
+- `the_challenge_flag_is_up_exactly_while_the_user_decides`, the review's addition: the `Handler`
+  side, with no server. Its user answers only once the flag is up, so a missing raise fails on a
+  timeout rather than hanging, and a missing lower fails the last assert.
+
+Untested: the `watching` flag for a sender already dropped. Without it the loop would spin instead of
+wait, and a test of that would hang rather than fail — tokio's paused clock does not advance while a
+task keeps yielding. The flag is one line and says why it is there. Checked by hand: a first-contact
+Challenge left open well past 30 seconds, then accepted.
+
+Left as it was: when the timer does give up, dropping `client::connect` detaches russh's session task
+rather than stopping it, so a key exchange that completes late can still raise a Challenge for a
+session already reported as failed. The old `timeout` did the same, and with the clock now paused
+during the dialog, a timeout can no longer fire under an open one.

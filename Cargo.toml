@@ -286,6 +286,10 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 # Temporary directories for tests that write known_hosts fixtures (§13).
 tempfile = "3"
+# `test-util` = tokio's paused clock, for tests only (PLAN §179): the connect timeout's tests are a story
+# of minutes, and on the paused clock they run instantly and cannot be late on a loaded machine (§111).
+# A feature of a crate already in the tree, not a new crate; the shipped binary never sees it.
+tokio = { version = "1.53.1", features = ["test-util"] }
 
 # Release profile (PLAN §11): a small, fast, self-contained portable exe.
 #   lto            — link-time optimization across crates
