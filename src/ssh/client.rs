@@ -404,14 +404,28 @@ async fn session_task(
 			let _ = events.send(SshEvent::Disconnected).await;
 		}
 		Err(error) => {
-			// Log detail server-side; show the user a generic message.
+			// The detail goes to stderr (a debug build's console; a release build has none), the
+			// screen gets one of two fixed lines (§178).
 			eprintln!("ssh session error: {error:#}");
 			let _ = events
-				.send(SshEvent::Error(
-					"Could not establish the SSH session.".to_string(),
-				))
+				.send(SshEvent::Error(user_message(&error).to_string()))
 				.await;
 		}
+	}
+}
+
+/// The line the user sees for a session that failed (§12, §178).
+///
+/// Two lines, and only two. A refused login is named, since only the server knows its cause —
+/// without saying which factor, since `AuthRefused` carries none. Everything else (a timeout, a
+/// rejected host key, a channel the server would not open) keeps the generic line, its detail going
+/// to stderr only. anyhow's `is` sees through any `.context()` added between `auth` and here; it
+/// would not see through an error that wraps `AuthRefused` as its `source`, and nothing does.
+fn user_message(error: &anyhow::Error) -> &'static str {
+	if error.is::<auth::AuthRefused>() {
+		"Authentication failed."
+	} else {
+		"Could not establish the SSH session."
 	}
 }
 
@@ -499,8 +513,8 @@ async fn connect_and_run(
 	.context("could not connect")?;
 
 	// Authenticate: the chosen method first, then chaining into keyboard-interactive as the
-	// server directs — 2FA / OTP and challenge-response (§7). A failure is a single generic
-	// error, with no hint about which factor was wrong (no credential oracle, §12).
+	// server directs — 2FA / OTP and challenge-response (§7). A refusal is one factor-less
+	// `AuthRefused` (§178), with no hint about which factor was wrong (no credential oracle, §12).
 	auth::authenticate(&mut session, &params, events, &mut to_session_rx).await?;
 
 	let _ = events.send(SshEvent::Connected).await;
@@ -1048,7 +1062,29 @@ impl Handler {
 
 #[cfg(test)]
 mod tests {
-	use super::compressed_preferences;
+	use super::{compressed_preferences, user_message};
+	use crate::ssh::auth::AuthRefused;
+
+	/// A refused login is named as one on screen (§178), however much context was added on the way
+	/// up, and every other failure keeps the generic line.
+	#[test]
+	fn a_refused_login_says_authentication_failed_and_anything_else_stays_generic() {
+		let refused = anyhow::Error::new(AuthRefused).context("while authenticating");
+		let timed_out = anyhow::anyhow!("connection timed out");
+
+		// The same words as `AuthRefused`'s Display, as a plain string: the type decides, not the text.
+		let lookalike = anyhow::anyhow!("authentication failed");
+
+		assert_eq!(user_message(&refused), "Authentication failed.");
+		assert_eq!(
+			user_message(&timed_out),
+			"Could not establish the SSH session."
+		);
+		assert_eq!(
+			user_message(&lookalike),
+			"Could not establish the SSH session."
+		);
+	}
 
 	/// Compression is asked for, and asked for in an order that is a decision (§167).
 	///

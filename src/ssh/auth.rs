@@ -12,8 +12,8 @@
 // once, and this repeats until the server accepts or rejects. A message-only batch (no
 // prompts) is answered with an empty response set without troubling the user.
 //
-// Auth failure is deliberately a single generic error — we never reveal which field, factor,
-// or user was wrong (no credential oracle, §12).
+// A refused login is one factor-less error, `AuthRefused`: the screen may say the login failed
+// (§178), never which field, factor or user was wrong (no credential oracle, §12).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -37,6 +37,24 @@ const MAX_PASSPHRASE_ATTEMPTS: u32 = 3;
 /// OpenSSH's `MaxAuthTries` so a server that keeps re-offering the method cannot loop the
 /// prompt forever; the user can also cancel any prompt to abort sooner.
 const MAX_AUTH_ATTEMPTS: u32 = 3;
+
+/// The server refused every credential offered. The commonest failure fixed from the form, and one
+/// whose cause only the server knows, so the screen names it (§178) where every other failure stays
+/// one generic line.
+///
+/// A unit struct on purpose. It carries no method, no user and no remaining-methods list, so the
+/// message it becomes cannot say WHICH factor was wrong — §12's no-credential-oracle rule holds by
+/// construction, not by care at the place it is shown. `client::user_message` reads it back by type.
+#[derive(Debug)]
+pub(crate) struct AuthRefused;
+
+impl std::fmt::Display for AuthRefused {
+	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		formatter.write_str("authentication failed")
+	}
+}
+
+impl std::error::Error for AuthRefused {}
 
 /// The result of one authentication attempt, normalised across the two russh return types
 /// (`AuthResult` for password/publickey, `KeyboardInteractiveAuthResponse` for the interactive
@@ -64,7 +82,8 @@ impl From<client::AuthResult> for Outcome {
 
 /// Authenticate the freshly handshaken `session` for `params`, running the chosen method and
 /// then chaining into keyboard-interactive as the server directs (§7). Returns `Ok(())` once
-/// the server has fully accepted us, or a generic error otherwise.
+/// the server has fully accepted us, `AuthRefused` when it refused (see `last_failure`), or
+/// another error for a local or transport ending.
 pub(crate) async fn authenticate(
 	session: &mut client::Handle<Handler>,
 	params: &ConnectParams,
@@ -151,12 +170,29 @@ pub(crate) async fn authenticate(
 						keyboard_interactive(session, params.user.as_str(), events, to_session_rx)
 							.await?;
 				} else {
-					// Nothing left to try, or we have retried enough: one generic failure, with
-					// no hint about which factor was wrong (no credential oracle, §12).
-					bail!("authentication failed");
+					// Nothing left to try, or we have retried enough: one failure, with no hint
+					// about which factor was wrong (no credential oracle, §12).
+					return Err(last_failure(session.is_closed()));
 				}
 			}
 		}
+	}
+}
+
+/// What a `Failure` with nothing left to try means (§178): a refusal, or a connection that died.
+///
+/// russh cannot be asked which. When the connection goes while a request waits for its reply,
+/// `Handle::wait_recv_reply` answers with a `Failure` listing no methods — the same value a
+/// refusal can carry. What tells them apart is the session: russh's `run` closes the handle's
+/// sender as it ends, before the reply channel goes, so `is_closed` is already true when that
+/// `Failure` arrives. A link dropped during PAM's delay after a wrong password would otherwise
+/// read on screen as "wrong password", the very misdirection §178 exists to end, reversed.
+/// A pure function, taking `is_closed`'s answer, so the choice is testable without a server.
+fn last_failure(session_closed: bool) -> anyhow::Error {
+	if session_closed {
+		anyhow::anyhow!("the connection closed during authentication")
+	} else {
+		AuthRefused.into()
 	}
 }
 
@@ -322,6 +358,14 @@ mod tests {
 	// A `MethodSet` listing exactly the given methods, for the retry-rule tests.
 	fn methods(kinds: &[MethodKind]) -> MethodSet {
 		MethodSet::from(kinds)
+	}
+
+	/// A refusal on a live session is `AuthRefused`; the same empty `Failure` on a session that
+	/// closed is a lost connection, and must not tell the user their password was wrong (§178).
+	#[test]
+	fn a_refusal_is_auth_refused_but_a_closed_connection_is_not() {
+		assert!(last_failure(false).is::<AuthRefused>());
+		assert!(!last_failure(true).is::<AuthRefused>());
 	}
 
 	#[test]

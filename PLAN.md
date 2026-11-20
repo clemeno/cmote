@@ -21376,3 +21376,61 @@ guard untested: `ctrl_c_after_a_bare_click_is_still_the_interrupt`, probed by tu
 `if` and one new branch; the review's findings were both about where the newly long-lived anchor would
 travel — into a program's mouse mode and across a screen switch. The question to ask of a value that
 used to be thrown away is where it can now be read from that it never was.
+
+## §178 — A refused login says so: "Authentication failed."
+
+Every failed session showed the same line, "Could not establish the SSH session.", with the reason only
+on stderr — which the release build, a Windows GUI program, has nowhere to print. A login that failed
+on an **empty password field** cost a debugging session to find: two guesses at the network (the
+compression order of §167 included, ruled out by a probe) before a debug build's console said
+`authentication failed`. It is the commonest failure fixed from the form, and the one whose cause only
+the server knows, so it is now the one the screen names.
+
+**§12 still holds.** The no-credential-oracle rule is about *which* factor was wrong — user, password,
+key, one-time code — and "Authentication failed." names none of them. OpenSSH says more: "Permission
+denied (password,publickey)." lists the methods still open. What this line does reveal, that the
+network and the key exchange worked, the user could already learn from any other client.
+
+### How (`ssh/auth.rs`, `ssh/client.rs`)
+
+Where the chaining loop runs out of things to try, `auth::last_failure` raises `auth::AuthRefused`, a
+unit struct. It follows the pattern of `transfer::TransferRefused` (§17) — a failure class with a type,
+read back where it is reported — with one difference on purpose: that one wraps the server's words so
+the status bar can show them, and this one must hold no words at all. With no method and no
+remaining-methods list in it, the message cannot grow a hint about the factor without someone adding a
+field to carry it. `client::user_message` picks the line with anyhow's `is`, which sees through any
+`.context()` on the way up (and, unlike `was_refused`'s chain walk, not through a wrapping error — of
+which there is none on this path).
+
+**A dead connection is not a refusal.** The review found that russh answers a request whose connection
+died with a `Failure` listing no methods (`Handle::wait_recv_reply`) — the very value a refusal can
+carry. Raised as `AuthRefused`, a link that drops during PAM's delay after a password would have told
+the user the password was wrong: this section's misdirection, reversed. `last_failure` takes
+`Handle::is_closed`, which russh's `run` makes true before the reply channel goes, and a closed session
+keeps the generic line. Left over is a server that sends its failure and THEN hangs up: it may read as
+closed, and shows the generic line — the safe direction under §12.
+
+Not covered, each keeping the generic line with its reason on stderr only, which a release build drops:
+
+- **The local endings**: a key or certificate file that will not load, the wrong passphrase on every
+  prompt, a prompt cancelled (keyboard-interactive's included, mid-conversation), no agent running, or
+  an agent with no keys.
+- **A transport error** during an auth request (`.context("… request failed")`).
+- **A server that refuses by hanging up.** OpenSSH at its `MaxAuthTries` sends DISCONNECT ("Too many
+  authentication failures") instead of a last `Failure` — an agent with six keys, or a hardened server
+  and a few mistyped codes. A refusal, shown as the generic line, and the server's reason is not even
+  on stderr: `client::Handler` does not override `disconnected`, and russh's default only `debug!`s it.
+  From reading russh and sshd, not reproduced.
+- **A partial success towards a method other than keyboard-interactive** (`AuthenticationMethods
+  publickey,password`): cmote chains only into keyboard-interactive (§7), so the accepted key ends in
+  "Authentication failed." — true, and nothing on the form fixes it.
+
+`ponytail:` naming any of these costs a marker type and a `user_message` branch each, and overriding
+`disconnected` to print the server's reason is one method. Each is worth doing once it costs a session
+the way this one did.
+
+Two tests, each probed on its line: `user_message`'s condition forced to `false` (`left: "Could not
+establish the SSH session."`), and `last_failure`'s closed branch removed. A third assert keeps a
+plain `"authentication failed"` string on the generic line, so the type decides and not the text. The
+call into `last_failure` needs a server that refuses (§13): checked by hand, an empty password against
+a server that wants one.
