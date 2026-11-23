@@ -21596,6 +21596,8 @@ that the obvious probe left `a_deep_history_…` and `offset_reads_…` green; t
 
 Untested: `map_drag` and `draw` themselves, which need a widget tree and a renderer; they are event
 plumbing over the tested geometry, the scrollbar's own split. The find bar's new inset is layout.
+Checked by hand on 2026-11-23, in the debug build: the blocks, the slider, a press that jumps the view,
+and a drag of the slider.
 
 ### What it does not do
 
