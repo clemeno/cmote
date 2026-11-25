@@ -346,7 +346,8 @@ pub fn view<'a>(
 		matches,
 		terminal.images(),
 		grid_interaction(terminal.pointer_shape()),
-	);
+	)
+	.commands(terminal.finished_commands());
 
 	// It reacts to the mouse (§10): press-drag-release drives the text selection and a
 	// right-press opens the context menu. `on_move` reports a point local to the grid,

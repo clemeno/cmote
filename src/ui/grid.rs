@@ -220,6 +220,16 @@ pub struct Grid<'a> {
 	/// strip of pixels that belongs to cmote, and which of the two got drawn depended on which
 	/// mechanism painted last. Deciding it in one place is the fix; the answer is that the bar wins.
 	pointer: Option<mouse::Interaction>,
+	/// The finished commands as absolute line spans with their exit codes (§181), for the minimap's
+	/// command wash. Set by `commands` rather than by `grid`, whose arguments are at clippy's limit.
+	commands: Vec<(std::ops::Range<u64>, Option<i32>)>,
+}
+
+impl Grid<'_> {
+	/// Hand the grid the finished commands to wash on the minimap (§181).
+	pub fn commands(self, commands: Vec<(std::ops::Range<u64>, Option<i32>)>) -> Self {
+		Self { commands, ..self }
+	}
 }
 
 /// Draw the emulator's current screen, highlighting `selection` if there is one, washing the find
@@ -242,6 +252,7 @@ pub fn grid<'a>(
 		matches,
 		images,
 		pointer,
+		commands: Vec::new(),
 	}
 }
 
@@ -716,6 +727,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 			self.screen,
 			minimap::column(bounds, rows),
 			foreground,
+			&self.commands,
 		);
 
 		// The prompt ticks (§34): one mark in the left padding gutter for every shell prompt on

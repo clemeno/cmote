@@ -314,11 +314,13 @@ const MAX_COMMANDS: usize = MAX_MARKS;
 /// gutter tick a click lands on); `output` the line its output began on (the C mark); `end` the
 /// line it finished on (the D mark, where the next prompt will draw). The output therefore occupies
 /// the half-open line range `output .. end`, so a command that printed nothing has `output == end`.
+/// `exit` is what its D mark reported, kept for the minimap's command wash (§181).
 #[derive(Debug, Clone, Copy)]
 struct Osc133Command {
 	prompt: u64,
 	output: u64,
 	end: u64,
+	exit: Option<i32>,
 }
 
 impl Osc133Command {
@@ -349,9 +351,11 @@ struct Pending {
 /// That identity is EXACT until the scrollback fills: once the engine hits its retention cap
 /// (§23, `SCROLLBACK`) it evicts an old line for each new one, so `history_size` stops growing
 /// while lines keep scrolling off — and absolute indices recorded on either side of that point no
-/// longer share an origin. `ponytail:` past the cap the marks drift; a jump then lands near, not
-/// on, an old prompt. The recent prompts a jump actually reaches are always fresh, so the common
-/// case is exact; only history deeper than the cap is approximate.
+/// longer share an origin. `ponytail:` past the cap no mark moves with its text. Every new one is
+/// recorded at `SCROLLBACK + row`, right until the next line scrolls off, and each line that does
+/// leaves every mark one line further below its text, so a jump lands below the prompt it meant. The
+/// minimap's wash stops at the cap for this reason (§181). The upgrade is an eviction count, which
+/// the engine does not expose.
 #[derive(Debug, Default)]
 pub struct Prompts {
 	scanner: Scanner,
@@ -425,7 +429,7 @@ impl Prompts {
 				self.last_exit = exit;
 				// The command finished on this line: file its span so its output can be selected.
 				if let Some(pending) = self.pending.take() {
-					self.file_command(pending, absolute);
+					self.file_command(pending, absolute, exit);
 				}
 			}
 		}
@@ -468,11 +472,12 @@ impl Prompts {
 	/// line too, so its range comes out empty and it selects nothing — but it is still filed, so a
 	/// click on its prompt tick resolves (to nothing) rather than falling through to a stray text
 	/// selection.
-	fn file_command(&mut self, pending: Pending, end: u64) {
+	fn file_command(&mut self, pending: Pending, end: u64, exit: Option<i32>) {
 		self.commands.push(Osc133Command {
 			prompt: pending.prompt,
 			output: pending.output.unwrap_or(end),
 			end,
+			exit,
 		});
 		if self.commands.len() > MAX_COMMANDS {
 			self.commands.remove(0);
@@ -536,6 +541,17 @@ impl Prompts {
 		let range = self.commands[at].range()?;
 		self.walk = Some(at);
 		Some(range)
+	}
+
+	/// Every finished command still held, oldest first: the absolute lines from its prompt up to the
+	/// line it finished on — prompt, command line and output together — with the exit code its D mark
+	/// reported (§181). What the minimap washes green, red or blue. A command whose D landed on its
+	/// prompt's own line comes out empty, and the wash's own floor still paints it a row tall.
+	pub fn finished(&self) -> Vec<(std::ops::Range<u64>, Option<i32>)> {
+		self.commands
+			.iter()
+			.map(|command| (command.prompt..command.end, command.exit))
+			.collect()
 	}
 
 	/// Forget every prompt (a full reset — `ESC c` — or the screen cleared them out from under us).
@@ -770,7 +786,7 @@ mod tests {
 		// area" — a remote turning on input reporting through a payload whose declared job is saying
 		// where the prompt sits, and a side door around the mouse modes (§10). There is no path from
 		// this scanner to a mouse mode at all: the one field `Mark` carries is `D`'s exit code, a
-		// number shown on a tab, so the refusal is structural. This test is what makes it deliberate
+		// number shown as a colour, on a tab and on the minimap (§181), so the refusal is structural. This test is what makes it deliberate
 		// rather than incidental.
 		assert_eq!(
 			marks(b"\x1b]133;A;click_events=1\x07"),
@@ -1372,5 +1388,31 @@ mod tests {
 		assert_eq!(prompts.walk_output(), Some((1, 2)));
 		prompts.clear();
 		assert_eq!(prompts.walk_output(), None);
+	}
+
+	#[test]
+	fn each_finished_command_spans_its_prompt_to_its_end_with_its_exit_code() {
+		// What the minimap washes (§181): a success, a failure, a bare D with no code, and a command
+		// whose D landed on its own prompt's line, an empty span. A command still running is not
+		// finished, so it is not there.
+		let mut prompts = Prompts::default();
+		run_command(&mut prompts, 0, 3);
+		prompts.apply(Mark::PromptStart, 3, 0);
+		prompts.apply(Mark::CommandEnd(Some(130)), 5, 0);
+		prompts.apply(Mark::PromptStart, 5, 0);
+		prompts.apply(Mark::CommandEnd(None), 7, 0);
+		prompts.apply(Mark::PromptStart, 7, 0);
+		prompts.apply(Mark::CommandEnd(Some(0)), 7, 0);
+		prompts.apply(Mark::PromptStart, 8, 0);
+		prompts.apply(Mark::OutputStart, 9, 0);
+		assert_eq!(
+			prompts.finished(),
+			vec![
+				(0..3, Some(0)),
+				(3..5, Some(130)),
+				(5..7, None),
+				(7..7, Some(0)),
+			]
+		);
 	}
 }

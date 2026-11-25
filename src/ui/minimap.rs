@@ -25,6 +25,9 @@
 //
 // The slider is named for VS Code's own and never "band": that word is DECSLRM's, the columns between
 // the margins (§102).
+//
+// Under the ink, each finished shell command gets a command wash (§181): its lines tinted green, red
+// or blue by the exit code its shell reported, so a failure stands out from a long way off.
 
 use iced::advanced::renderer::{Quad, Renderer as _};
 use iced::{Background, Border, Color, Rectangle};
@@ -58,6 +61,20 @@ const INK_ALPHA: f32 = 0.6;
 /// The slider that marks what the grid is showing: the scrollbar's grey, faint enough that the ink under
 /// it still shows (`ui::scrollbar::THUMB` is the same grey at 0.55).
 const SLIDER: Color = Color::from_rgba(0.82, 0.82, 0.82, 0.15);
+
+/// The command wash of a command that exited 0 (§181): Figma's light-theme success green.
+const SUCCEEDED: Color = Color::from_rgb8(0x14, 0xae, 0x5c);
+
+/// The wash of any other exit code, 130 (a Ctrl+C) among them: Figma's light-theme danger red.
+const FAILED: Color = Color::from_rgb8(0xf2, 0x48, 0x22);
+
+/// The wash of a command finished with no code — a bare `133;D`, or a field that is not a number:
+/// Figma's light-theme brand blue.
+const UNREPORTED: Color = Color::from_rgb8(0x0d, 0x99, 0xff);
+
+/// How opaque one wash is: enough to tell green from red at a glance, faint enough that the ink over
+/// it still reads. Where squeezed washes overlap they add up and come out denser.
+const WASH_ALPHA: f32 = 0.3;
 
 /// Where the map is in a grid of `bounds` showing `rows` rows: left of the scrollbar's gutter, and from
 /// the first row's top to the last row's bottom — the scrollbar's own track, so the two run side by
@@ -128,6 +145,42 @@ pub fn offset(column: Rectangle, rows: u16, history: u16, top: f32) -> u16 {
 		.expect("clamped into 0..=history, a u16, on the line above")
 }
 
+/// The finished commands' washes in the order they are painted, each with its colour (§181): every
+/// command but the failures oldest first, then the failures.
+///
+/// Failures last because squeezed washes overlap. Each is floored to a row (`wash`), so the short
+/// commands after a failure would paint over it — three of them leave a tenth of its red — and a
+/// failure is what the wash is there to show.
+fn washes(
+	commands: &[(std::ops::Range<u64>, Option<i32>)],
+) -> impl Iterator<Item = (&std::ops::Range<u64>, Color)> {
+	let failed = |exit: &Option<i32>| matches!(exit, Some(code) if *code != 0);
+	let others = commands.iter().filter(move |(_, exit)| !failed(exit));
+	let failures = commands.iter().filter(move |(_, exit)| failed(exit));
+	others.chain(failures).map(|(lines, exit)| {
+		let color = match exit {
+			Some(0) => SUCCEEDED,
+			Some(_) => FAILED,
+			None => UNREPORTED,
+		};
+		(lines, color)
+	})
+}
+
+/// Where one finished command's wash goes (§181): the column's whole width over the document `lines`
+/// it spans, prompt to end. Never shorter than one painted row (`LINE`): squeezed, a one-line failure
+/// would be about a thirtieth of a pixel (0.034 at 24 rows of a full history), and a failure is what
+/// the wash is there to show. An empty span, a D on its prompt's own line, gets the same row.
+fn wash(column: Rectangle, rows: u16, history: u16, lines: &std::ops::Range<u64>) -> Rectangle {
+	let scale = scale(column.height, rows, history);
+	let at = |line: u64| crate::ui::pixels(usize::try_from(line).unwrap_or(usize::MAX), scale);
+	Rectangle {
+		y: column.y + at(lines.start),
+		height: (at(lines.end) - at(lines.start)).max(LINE),
+		..column
+	}
+}
+
 /// Which document line each painted row of the map shows, top to bottom, with the row's distance from
 /// the map's top: every line while they fit, then an even sample of them, one every `LINE` pixels.
 ///
@@ -153,9 +206,11 @@ fn painted_lines(height: f32, rows: u16, history: u16) -> impl Iterator<Item = (
 	})
 }
 
-/// Paint the map of `screen` into `column`: each painted line's ink in its own colours, then the slider
-/// over the lines the grid is showing. `foreground` is the colour a cell's default foreground is
-/// drawn in, which the grid knows and this file does not (DECSCNM swaps it, §149).
+/// Paint the map of `screen` into `column`: the wash of each finished command in `commands` (absolute
+/// lines and exit code, §181, in `washes`' order), each painted line's ink in its own colours over it,
+/// then the slider over
+/// the lines the grid is showing. `foreground` is the colour a cell's default foreground is drawn in,
+/// which the grid knows and this file does not (DECSCNM swaps it, §149).
 ///
 /// Nothing at all with no history, the scrollbar's rule (`scrollbar_thumb`): a map of only the screen
 /// beside the screen says nothing, and on the alternate screen, which keeps none, a press on the
@@ -165,11 +220,21 @@ pub fn draw(
 	screen: Screen<'_>,
 	column: Rectangle,
 	foreground: Color,
+	commands: &[(std::ops::Range<u64>, Option<i32>)],
 ) {
 	let (rows, _) = screen.size();
 	let history = screen.history_size();
 	if history == 0 {
 		return;
+	}
+	for (lines, color) in washes(commands) {
+		renderer.fill_quad(
+			quad(wash(column, rows, history, lines)),
+			Background::Color(Color {
+				a: WASH_ALPHA,
+				..color
+			}),
+		);
 	}
 	let left = column.x + GAP;
 	let columns = crate::ui::cell_index(column.width - GAP, CELL);
@@ -350,6 +415,56 @@ mod tests {
 		assert_eq!(offset(column, 24, 5000, column.y + 5000.0), 0);
 		assert_eq!(offset(column, 24, 100, f32::INFINITY), 0);
 		assert_eq!(offset(column, 24, 100, f32::NEG_INFINITY), 100);
+	}
+
+	#[test]
+	fn a_wash_covers_its_commands_lines_and_never_less_than_a_row() {
+		// Drawn line for line, a command on lines 10..13 is washed over exactly those three, across
+		// the whole column. Squeezed into a 10 000-line history, a one-line command is still a row.
+		let column = column(bounds(), 24);
+		let short = wash(column, 24, 100, &(10..13));
+		close(short.y, column.y + 10.0 * LINE, "from its prompt");
+		close(short.height, 3.0 * LINE, "to its end");
+		close(short.x, column.x, "the column's left edge");
+		close(short.width, WIDTH, "the column's whole width");
+		let deep = wash(column, 24, 10_000, &(5000..5001));
+		close(deep.height, LINE, "floored at one painted row");
+		// Above the floor a squeezed wash is the scale's height, not LINE a line: 1000 lines are the
+		// distance the slider moves over them, about 35 pixels and not 2000.
+		close(
+			wash(column, 24, 10_000, &(1000..2000)).height,
+			slider(column, 24, 10_000, 8000).y - slider(column, 24, 10_000, 9000).y,
+			"squeezed like the slider",
+		);
+		close(
+			deep.y,
+			slider(column, 24, 10_000, 5000).y,
+			"on the line the slider puts there",
+		);
+	}
+
+	#[test]
+	fn failures_are_washed_last_each_command_in_its_exit_codes_colour() {
+		// Oldest first, but every failure after the rest, so no short command painted later can cover
+		// one: green for 0, blue for no code, red for 1 and for 130.
+		let commands = [
+			(0..2, Some(1)),
+			(2..4, Some(0)),
+			(4..6, None),
+			(6..8, Some(130)),
+		];
+		let painted: Vec<(std::ops::Range<u64>, Color)> = washes(&commands)
+			.map(|(lines, color)| (lines.clone(), color))
+			.collect();
+		assert_eq!(
+			painted,
+			vec![
+				(2..4, SUCCEEDED),
+				(4..6, UNREPORTED),
+				(0..2, FAILED),
+				(6..8, FAILED),
+			]
+		);
 	}
 
 	#[test]

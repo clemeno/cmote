@@ -249,7 +249,8 @@ _Avoid_: prompt, unqualified — that is the connect form's (see **Prompt**)
 The small cyan mark in the grid's left padding gutter beside every prompt on screen (§34). It says
 *a prompt was here* and nothing more: its colour separates a shell prompt from a script's own
 bookmark (OSC 1337 SetMark, §55), never success from failure.
-_Avoid_: reading any exit status into it — that is the **Dot**
+_Avoid_: reading any exit status into it — that is the **Dot**, or on the minimap the **Command
+wash**
 
 **Minimap**:
 The column beside the terminal's scrollbar that shows the whole document shrunk — every line while
@@ -259,15 +260,25 @@ the grid is showing.
 _Avoid_: overview, preview — the preview is the picture viewer tab (§53); band, for the slider —
 see **Band**
 
+**Command wash**:
+The translucent colour the minimap lays under one finished command, its prompt through its output
+(§181): green when it exited 0, red for any other code, blue when it finished with no code (a bare
+`133;D`, or a field that is not a number). Never shorter than one painted row, and the failures are
+painted last, so a one-line failure in a deep history still shows. None once the history is full.
+Always written whole: a bare "wash" is also the find bar's tint on its matches (§39).
+_Avoid_: band — see **Band**; stripe — see **Stripe**; highlight — the find bar's word for its
+matches on the grid (`SearchHighlight`, §39)
+
 **Ink**:
 A cell's foreground as drawn — the ink on the paper (the palette's ink slots, §138). The minimap's
 `Ink` is one run of it: consecutive visible cells of one foreground on a line (§180).
 
 **Dot**:
 The command-status light on a tab's chip (§34): amber while a command runs, green when the last one
-exited 0, red when it failed, absent on a tab whose shell announces nothing. The ONLY place an exit
-status is shown, and it shows as a colour — never a glyph, never the number, because a 30-pixel chip
-has no room for `✗130`. On bash it never goes amber, the block sending no `OSC 133;C` (§17).
+exited 0, red when it failed, absent on a tab whose shell announces nothing. With the **Command
+wash**, one of the two places an exit status is shown, and both show it as a colour, never a glyph or
+the number: a 30-pixel chip has no room for `✗130`, and a map row two pixels tall has none for
+anything. On bash it never goes amber, the block sending no `OSC 133;C` (§17).
 _Avoid_: ✓/✗, which two code comments promised and no version ever drew (§170)
 
 **Held update**:

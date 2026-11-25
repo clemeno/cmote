@@ -966,12 +966,21 @@ impl Terminal {
 			}
 			graphics::GraphicsEvent::ClearScrollback => {
 				if !self.on_alternate {
-					self.graphics
-						.clear_scrollback(self.term.grid().history_size() as u64);
+					let history = self.term.grid().history_size() as u64;
+					self.graphics.clear_scrollback(history);
+					// The prompt marks and command spans too (§181): the erased lines go, and the page's
+					// lines move up to the top of a document that no longer has a history above them. A
+					// shell's `clear` sends this, and without it the minimap washed new output in the
+					// colours of the commands it replaced.
+					self.prompts.renumber(|line| line.checked_sub(history));
 				}
 			}
-			// RIS resets the terminal itself, so it takes everything wherever the session is.
-			graphics::GraphicsEvent::Reset => self.graphics.clear(),
+			// RIS resets the terminal itself, so it takes everything wherever the session is — the
+			// prompt marks and command spans with the pictures (§181).
+			graphics::GraphicsEvent::Reset => {
+				self.graphics.clear();
+				self.prompts.clear();
+			}
 		}
 		false
 	}
@@ -2307,6 +2316,22 @@ impl Terminal {
 		)
 	}
 
+	/// The finished commands as absolute line spans, each with the exit code its shell reported
+	/// (§181), for the minimap's command wash. Empty on a shell without integration.
+	///
+	/// Empty too once the history is full. Past `SCROLLBACK` an absolute line stops naming its text
+	/// (`osc133::Prompts`): every new command lands on the map's last screenful and the older washes
+	/// stay put while their text scrolls away, so a map coloured that way would point at the wrong
+	/// output. `ponytail:` the wash stops at the cap until a shell's `clear` (`CSI 3 J`) or a reset
+	/// empties the history; the upgrade is an eviction count, which the engine does not expose.
+	pub fn finished_commands(&self) -> Vec<(std::ops::Range<u64>, Option<i32>)> {
+		if self.term.grid().history_size() >= SCROLLBACK {
+			Vec::new()
+		} else {
+			self.prompts.finished()
+		}
+	}
+
 	/// The branch the remote shell last announced (§55), or `None` when it announced none — which is
 	/// every shell that does not set iTerm2's `gitBranch` user variable, so most of them. Already safe
 	/// to draw: decoded, UTF-8, control characters stripped, length capped.
@@ -2532,7 +2557,8 @@ pub struct Terminal {
 	queries: query::Queries,
 	/// Reads the OSC 133 shell-integration prompt marks (§34), which the engine also ignores. Holds
 	/// the command-cycle state, the last exit code, and where each prompt sits, so the GUI can show
-	/// a per-tab status glyph and jump between prompts. Unlike the other scanners, `process` feeds
+	/// a per-tab status dot, jump between prompts and wash each finished command on the minimap
+	/// (§181). Unlike the other scanners, `process` feeds
 	/// this one by splitting the advance at each mark, so a prompt is recorded at the grid line the
 	/// cursor is on when the mark arrives.
 	prompts: osc133::Prompts,
@@ -5027,6 +5053,55 @@ mod tests {
 			.select_output_at_row(0)
 			.expect("the prompt tick's command");
 		assert_eq!((clicked.start_line, clicked.end_line), (1, 2));
+	}
+
+	/// What a shell's `clear` and a reset do to the command spans the minimap washes (§181).
+	#[test]
+	fn erasing_the_scrollback_drops_the_commands_in_it_and_moves_the_rest_up() {
+		// Three rows. A failed command on lines 0..2, then a good one on 2..4 whose output scrolls the
+		// first into history: history 2, the second command's prompt on the page's top row.
+		let mut terminal = Terminal::new(3, 20);
+		terminal.process(b"\x1b]133;A\x07$ x\r\n\x1b]133;C\x07out\r\n\x1b]133;D;1\x07");
+		terminal.process(b"\x1b]133;A\x07$ y\r\n\x1b]133;C\x07out2\r\n\x1b]133;D;0\x07");
+		assert_eq!(terminal.screen().history_size(), 2, "the premise");
+		assert_eq!(
+			terminal.finished_commands(),
+			vec![(0..2, Some(1)), (2..4, Some(0))]
+		);
+		// `CSI 3 J`: the failure in the history goes; the good one is now lines 0..2, as its text is.
+		terminal.process(b"\x1b[3J");
+		assert_eq!(terminal.screen().history_size(), 0, "the history is gone");
+		assert_eq!(terminal.finished_commands(), vec![(0..2, Some(0))]);
+		// RIS: nothing is left.
+		terminal.process(b"\x1bc");
+		assert_eq!(
+			terminal.finished_commands(),
+			[] as [(std::ops::Range<u64>, Option<i32>); 0]
+		);
+	}
+
+	#[test]
+	fn a_full_history_washes_nothing_until_it_is_erased() {
+		// Past the cap an absolute line no longer names its text, so the map shows no wash rather than
+		// a wrong one (§181). One line short of the cap the command is still there; at the cap it goes;
+		// a shell's `clear` empties the history and the next command is washed again.
+		let mut terminal = Terminal::new(3, 20);
+		terminal.process(b"\x1b]133;A\x07$ x\r\n\x1b]133;C\x07\x1b]133;D;1\x07");
+		// The first newline only moves the cursor to the bottom row; each one after it scrolls a line.
+		terminal.process("\r\n".repeat(SCROLLBACK).as_bytes());
+		assert_eq!(
+			terminal.screen().history_size(),
+			u16::try_from(SCROLLBACK - 1).expect("10 000")
+		);
+		assert_eq!(terminal.finished_commands(), vec![(0..1, Some(1))]);
+		terminal.process(b"\r\n");
+		assert_eq!(
+			terminal.finished_commands(),
+			[] as [(std::ops::Range<u64>, Option<i32>); 0],
+			"at the cap"
+		);
+		terminal.process(b"\x1b[H\x1b[2J\x1b[3J\x1b]133;A\x07$ y\r\n\x1b]133;D;0\x07");
+		assert_eq!(terminal.finished_commands(), vec![(0..1, Some(0))]);
 	}
 
 	/// An output taller than the screen is located WHOLE (§40): the span is document lines, so the

@@ -264,7 +264,7 @@ cmote/
     │   ├── grid.rs        the terminal screen as ONE custom widget: cell-exact quads + text, drawn braille and box corners, mouse reports, search-match washes (§11, §39)
     │   ├── home.rs        the home screen: the filter box, the saved-target list, select / open / rename / delete, theme-following colours (§14, §49)
     │   ├── menu.rs        shared right-click menu chrome: panel / items / separator / dismiss layer (§10, §19, §52)
-    │   ├── minimap.rs     the whole scrollback shrunk into a column beside the terminal's scrollbar: blocks never glyphs, the slider, press to jump (§180)
+    │   ├── minimap.rs     the whole scrollback shrunk into a column beside the terminal's scrollbar: blocks never glyphs, the slider, press to jump (§180), each command washed by its exit code (§181)
     │   ├── preview.rs     the picture tab: a toolbar naming what the bytes turned out to be, the image on its ground (iced's own zoom/pan viewer), the refusal card (§53)
     │   ├── selection.rs   stream text selection over the grid, in absolute document lines; word / line expansion for a double or triple click; text extraction, unwrapping across a wrap (§10, §40, §42)
     │   ├── snackbar.rs    the copy-confirmation toast, bottom-centre, self-dismissing (§10)
@@ -299,7 +299,7 @@ cmote/
     │   ├── kitty.rs       encode a key event in the kitty keyboard protocol's CSI u form (§25)
     │   ├── mouse.rs       pointer events → the xterm mouse reports a program that asked for them expects (§9)
     │   ├── modkeys.rs     scan `CSI > 4 ; p m` out of the stream: the remote's modifyOtherKeys level (§9) — and answer `CSI ? 4 m` with it (§61)
-    │   ├── osc133.rs      scan the OSC 133 shell-integration marks out of the stream: prompt lines, command state, output ranges (§34)
+    │   ├── osc133.rs      scan the OSC 133 shell-integration marks out of the stream: prompt lines, command state, output ranges (§34), each finished command's exit code (§181)
     │   ├── query.rs       answer the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS — and amend its DA1 to advertise sixel (§33, §36, §41)
     │   ├── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through — incl. a cell's OSC 8 link, the kitty flags, the viewport↔document line mapping and whether a line wraps into the next (§9, §16, §23, §24, §25, §40, §42)
     │   └── search.rs      find text anywhere in the scrollback: a row flattened for searching, the match list, which is current, which are on screen (§35, §39)
@@ -21610,3 +21610,100 @@ and a drag of the slider.
   told, as it already could over the scrollbar's gutter, by more now.
 - **A window under about 83 px wide** has its one clamped column under the map. No window gets there
   but by force, and the regions' own floor (§48) is far above it.
+
+## §181 — The minimap washes each command in the colour of its exit code
+
+Asked for: on the minimap, each command and its output as a band, green when it succeeded and red when
+it failed, blue for any other result if one exists, in Figma's light-theme colours. One other result
+does exist: a shell may end a command with a bare `133;D`, or a field that is not a number, and
+`Mark::CommandEnd` then carries `None` (§96). That is the blue. A command still running has no result
+yet and gets no wash; the tab's dot says it runs (§34) where the shell sends `133;C`, which cmote's
+own bash block does not (§17).
+
+"Band" is DECSLRM's word here (§102) and "stripe" the files pane's (§166), so the thing is a **command
+wash** (`CONTEXT.md`). It is the first thing on the map besides the ink and the slider, the first of the
+"marks on the map" §180 left out.
+
+### What it reuses (`term/osc133.rs`)
+
+`Prompts` already files every finished command as its prompt, output and end lines for the output
+selection (§34); it dropped the exit code. `Osc133Command` now keeps it, and `Prompts::finished` hands
+out each command as `prompt..end` with its code: the prompt, the command line and the output together,
+up to the line the next prompt draws on. A command whose D lands on its own prompt's line comes out
+empty, and the wash's floor still paints it a row tall (below). `renumber` and `clear` treat the code as
+they treat the span. Absolute lines are the minimap's document lines (§180), exactly, until the
+scrollback cap (see what it does not do).
+
+### What is drawn (`ui/minimap.rs`)
+
+Under the ink, across the column's whole width, at 0.3 opacity so the ink over it still reads:
+Figma's light-theme UI3 status colours, success `#14AE5C`, danger `#F24822` and brand blue `#0D99FF`.
+Any non-zero code is red, 130 (a Ctrl+C) among them. A wash is never shorter than one painted row
+(`LINE`): squeezed into a full history, a one-line `false` would be about a thirtieth of a pixel (0.034
+at 24 rows), and a failure is the thing the wash is for.
+
+**Failures are painted last** (`washes`). With the floor, the short commands just after a failure
+overlap it, and painted oldest first they buried it: at 0.3 opacity each, three short successes on top
+left a tenth of its red. The review found it, scenario `make` failing, then `vim Makefile`, a passing
+`make` and `ls`. Where washes of one kind overlap they add up, so a run of short commands comes out
+denser than 0.3.
+
+The grid gets the spans through a builder method, `Grid::commands`, because `grid` is at clippy's
+seven-argument limit and its tests need none of them.
+
+### A shell's `clear` used to leave the marks behind (`term/mod.rs`)
+
+The review found it: `clear` sends `CSI 3 J`, which drops the whole history, and `Prompts` never heard
+of it. Only the pictures did (§41). The marks kept their old absolute lines, so once the history grew
+back the map washed new output in the colours of the commands `clear` had erased, and the ticks and
+jumps (§34) pointed at lines that held other text. It predates this section; the wash is what made it
+show. The erase event already arrives BEFORE the engine applies it (`graphics::GraphicsEvent`), so the
+history size read there is the one being erased: `renumber(|line| line.checked_sub(history))` drops
+every line in it, commands whole, and moves the page's lines to the top. RIS (`ESC c`) now calls
+`Prompts::clear`, which its doc comment already said it did.
+
+`CSI 2 J` needs nothing: on the primary screen the engine scrolls the page into the history, so every
+absolute line goes on naming its text.
+
+### Tests
+
+### The wash stops at the scrollback cap (`term/mod.rs`)
+
+The review found this one too. Once the history is full, `history_size` stays at 10 000 while lines go
+on scrolling off, so a mark is recorded at `10 000 + row` whatever has scrolled before it, and no mark
+moves with its text. Every command after the cap piled up on the map's last screenful, and the older
+washes stayed put while their output scrolled away. A map coloured that way points at the wrong output,
+so `Terminal::finished_commands` hands out nothing once the history is full (`ponytail:`); a `clear`
+empties it and the washes come back. The marks' own doc in `Prompts` said the recent prompts stay
+exact past the cap. They do not, and it now says so. The upgrade is an eviction count, which the engine
+does not expose.
+
+### Tests
+
+- `each_finished_command_spans_its_prompt_to_its_end_with_its_exit_code`: a success, a 130, a bare D,
+  a D on its own prompt's line (an empty span), and a command still running that must not be there.
+- `a_wash_covers_its_commands_lines_and_never_less_than_a_row`: the span line for line, the column's
+  width, and the floor in a deep history, on the line the slider puts there. Probed against the floor
+  removed (0.034 px for a one-line command in a 10 000-line history). The review added the squeezed
+  thousand-line wash, which a height of `LINE` a line passed before.
+- `failures_are_washed_last_each_command_in_its_exit_codes_colour`: the paint order and the three
+  colours, 1 and 130 both red. Probed against the chain turned round (the two reds first).
+- `erasing_the_scrollback_drops_the_commands_in_it_and_moves_the_rest_up`, through the bytes: a failure
+  scrolled into the history and a success on the page, then `CSI 3 J`, then RIS. Probed against the
+  `renumber` removed (both commands still there, at their old lines).
+- `a_full_history_washes_nothing_until_it_is_erased`: one line short of the cap, at it, and after a
+  `clear`. Probed against `>=` turned into `>` (the failure still washed at the cap).
+
+Untested: the paint in `draw`, which needs a renderer, the scrollbar's split (§180).
+
+### What it does not do
+
+- **A resize wipes every wash.** A reflow moves text between lines, so `Prompts::clear` runs on every
+  resize, as it did before (§34); the map is colourless until the next command finishes.
+- **An empty line repeats the last exit code.** cmote's bash and zsh blocks send `D;$?` at every prompt
+  (§17), and an Enter on an empty line leaves `$?` as it was, so after a `false` each bare Enter adds a
+  red row; a Ctrl+C at bash's prompt makes it 130. On bash, which sends no `133;C`, an empty line
+  cannot be told from a command that printed nothing.
+- **Found, not fixed:** on `CSI 3 J` the pictures (§41), the right-to-left lines (§76) and the line
+  sizes (§146) on the page keep their pre-erase absolute lines too. `graphics::clear_scrollback` drops
+  the erased ones and moves nothing. Same cause, a different change.

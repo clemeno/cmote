@@ -242,6 +242,11 @@ changed between releases, with the section number for each line.
   lines on screen. **Press anywhere** on it to jump there, or **drag** the slider. A short history is
   drawn a line for every two pixels; a long one is squeezed until all of it fits, so a press lands
   within a few lines of anywhere in it (§180). The column takes about nine columns from the terminal.
+  With shell integration on, each finished command — its prompt and its output — is washed **green**
+  when it exited 0, **red** when it failed, and **blue** when the shell did not say (§181), for the
+  commands run since the window was last resized. An Enter on an empty line repeats the last command's
+  colour, the shell reporting its exit code again. Once the history holds its full 10 000 lines the
+  colours go, until `clear` empties it.
 - **Search the scrollback** — **Ctrl+Shift+F** floats a find bar over the grid. Typing searches all
   10 000 lines as you go (case-insensitive) and lands on the **newest** hit, scrolling it into view and
   selecting it, so Copy takes it with no extra step; **↑** / **↓** walk older and newer and wrap at
@@ -1027,8 +1032,9 @@ title should now carry the directory, **Sync**/**Reveal** should come out of the
 `history | tail` on the remote should show no trace of it. A cyan **tick** should appear in the left
 gutter beside each prompt, and the **dot on the tab chip** should go green after `true` and red
 after `false` — on bash it never goes amber, because the block deliberately sends no `OSC 133;C`
-(§17). The dot is the only place the exit status shows, and it shows as a colour, never as a glyph
-or a number. Reopen the dialog and it should offer
+(§17). Scroll some output off the top and the minimap should wash the `true` green and the `false`
+red (§181). The exit status shows only as a colour, never as a glyph or a number. Reopen the dialog
+and it should offer
 **Remove**, which puts `.bashrc` back exactly as it was. Set a title from a program
 (`printf '\033]2;my title\033\\'`) and the bar should switch to `cmote — tester@localhost:2222
 — my title`; clearing it (`printf '\033]2;\033\\'`) brings the directory back (§23). Then:
